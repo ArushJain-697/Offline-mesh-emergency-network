@@ -1,0 +1,38 @@
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails
+._*
+
+# VS Code
+.vscode/
+
+# C build files
+*.o
+*.out
+*.exe
+*.a
+*.so
+*.dylib
+
+# Clang debug symbol folders
+*.dSYM/
+
+# Compiled executables
+first
+a.out
+main
+run
+
+# CMake build folders (if ever used)
+build/
+cmake-build*/
+
+# Logs
+*.log
+
+# Temp files
+*.tmp
+*.swp

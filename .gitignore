@@ -36,3 +36,4 @@ cmake-build*/
 # Temp files
 *.tmp
 *.swp
+my_mesh_project/udp_node

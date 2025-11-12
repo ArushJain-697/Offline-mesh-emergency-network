@@ -1,8 +1,29 @@
+# Compiler
 CC = gcc
-CFLAGS = -Wall -pthread
 
-udp_node: src/udp_node.c
-	$(CC) $(CFLAGS) src/udp_node.c -o udp_node
+# Compiler flags
+CFLAGS = -Wall -Wextra -pthread
 
+# Source files
+SRCS = mesh_backend.c mesh_gui.c
+
+# Object files
+OBJS = $(SRCS:.c=.o)
+
+# Output executable name
+TARGET = mesh_gui
+
+# Default rule
+all: $(TARGET)
+
+# Link object files into final executable
+$(TARGET): $(OBJS)
+	$(CC) $(OBJS) -o $(TARGET) $(CFLAGS)
+
+# Rule to compile each .c into .o
+%.o: %.c
+	$(CC) -c $< -o $@ $(CFLAGS)
+
+# Clean build artifacts
 clean:
-	rm -f udp_node
+	rm -f $(OBJS) $(TARGET)

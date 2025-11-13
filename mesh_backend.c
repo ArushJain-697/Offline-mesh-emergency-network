@@ -34,9 +34,9 @@ struct NodeInfo {
 
 // ✨ Replace these IPs with the real ones of each PC
 struct NodeInfo nodes[] = {
-    {'A', 9001, "172.16.130.221"},  // Your MacBook (Node A)
-    {'B', 9002, "172.16.133.192"},  // Friend’s laptop
-    {'C', 9003, "172.16.134.156"},  // Another PC
+    {'A', 9001, "10.138.204.116"},  // Your MacBook (Node A)
+    {'B', 9002, "10.138.204.180"},  // Friend’s laptop
+    {'C', 9003, "0.0.0.0"},  // Another PC
     {'D', 9004, "0.0.0.0"},  // Fourth PC
     {'E', 9005, "0.0.0.0"}   // Fifth PC
 };

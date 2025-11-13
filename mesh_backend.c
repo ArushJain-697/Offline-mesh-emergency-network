@@ -218,3 +218,4 @@ void backend_close() {
     printf("Logs saved to chat_log_%c.txt\n", node_name);
     close(sock);
 } // <--- THIS IS THE MISSING BRACE
+

@@ -1,2 +1,2 @@
-[B ➜ C @11:25:44]: fuck you
-[B ➜ ALL @11:25:52]: fuck you all
+[B ➜ A @12:29:21]: hello bruh
+[B ➜ A @12:31:25]: hello

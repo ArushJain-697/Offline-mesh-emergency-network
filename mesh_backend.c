@@ -25,14 +25,40 @@ static int sent_count = 0, recv_count = 0;
 // -----------------------------------------------------------
 // Helper Functions
 // -----------------------------------------------------------
+// Node configuration table
+struct NodeInfo {
+    char name;
+    int port;
+    char ip[32];
+};
+
+// ✨ Replace these IPs with the real ones of each PC
+struct NodeInfo nodes[] = {
+    {'A', 9001, "172.16.130.221"},  // Your MacBook (Node A)
+    {'B', 9002, "172.16.133.192"},  // Friend’s laptop
+    {'C', 9003, "172.16.134.156"},  // Another PC
+    {'D', 9004, "0.0.0.0"},  // Fourth PC
+    {'E', 9005, "0.0.0.0"}   // Fifth PC
+};
+
+// Get port number for a node
 int get_port(char node) {
-    if (node == 'A') return 9001;
-    if (node == 'B') return 9002;
-    if (node == 'C') return 9003;
-    if (node == 'D') return 9004;
-    if (node == 'E') return 9005;
+    for (int i = 0; i < 5; i++) {
+        if (nodes[i].name == node)
+            return nodes[i].port;
+    }
     return -1;
 }
+
+// Get IP address for a node
+const char* get_ip(char node) {
+    for (int i = 0; i < 5; i++) {
+        if (nodes[i].name == node)
+            return nodes[i].ip;
+    }
+    return "127.0.0.1"; // fallback (loopback)
+}
+
 
 void get_time_str(char *out) {
     time_t t;
@@ -101,7 +127,8 @@ void backend_send_message(char to, const char *msg) {
 
     dest.sin_family = AF_INET;
     dest.sin_port = htons(port);
-    dest.sin_addr.s_addr = inet_addr("127.0.0.1");
+    dest.sin_addr.s_addr = inet_addr(get_ip(to));
+
 
     get_time_str(tstamp);
     sprintf(packet, "[%c ➜ %c @%s]: %s",
@@ -133,7 +160,8 @@ void backend_broadcast(const char *msg) {
 
         dest.sin_family = AF_INET;
         dest.sin_port = htons(port);
-        dest.sin_addr.s_addr = inet_addr("127.0.0.1");
+        dest.sin_addr.s_addr = inet_addr(get_ip(n));
+
 
         sendto(sock, packet, strlen(packet), 0,
                (struct sockaddr*)&dest, sizeof(dest));

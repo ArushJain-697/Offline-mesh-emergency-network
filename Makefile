@@ -27,3 +27,4 @@ $(TARGET): $(OBJS)
 # Clean build artifacts
 clean:
 	rm -f $(OBJS) $(TARGET)
+

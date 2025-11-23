@@ -2,10 +2,10 @@
 // Simple helper program to broadcast a new-node join message
 // Usage: ./new <HelperNodeLetter> <NewNodeLetter> <NewNodeIP> <NewNodePort>
 //
-// Example: ./new A F 192.168.1.55 9006
-//
-// This will: update local nodes.dat with F, and send NET_ADD:F:192.168.1.55:9006
-// to all other nodes (A..Z) discovered in nodes.dat.
+// This will: 
+// 1. Update local nodes.dat with F
+// 2. Send NET_ADD:F... to all other nodes
+// 3. Log the event to Helper's chat history file
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <time.h> // Added for timestamp
 
 #define NODES_DATA_FILE "nodes.dat"
 #define MAX_LINE 256
@@ -24,6 +25,25 @@ struct Node {
     char ip[MAX_IP_LEN];
     int port;
 };
+
+// --- Helper function to get time string ---
+void get_time_str(char *buf, size_t size) {
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    strftime(buf, size, "%H:%M:%S", t);
+}
+
+// --- Helper function to append to history file ---
+void log_to_history(char helper_node, const char *msg) {
+    char filename[64];
+    snprintf(filename, sizeof(filename), "chat_history_%c.txt", helper_node);
+    
+    FILE *fp = fopen(filename, "a");
+    if (fp) {
+        fprintf(fp, "%s\n", msg);
+        fclose(fp);
+    }
+}
 
 int load_nodes(struct Node *nodes, int max_nodes) {
     FILE *fp = fopen(NODES_DATA_FILE, "r");
@@ -131,6 +151,18 @@ int main(int argc, char **argv) {
     }
 
     close(sock);
-    printf("Helper update done. Helper's local nodes.dat updated.\n");
+    
+    // --- FINAL STEP: LOG TO HELPER HISTORY ---
+    char time_str[16];
+    get_time_str(time_str, sizeof(time_str));
+    
+    char log_entry[512];
+    snprintf(log_entry, sizeof(log_entry), 
+             "[%s] [SYSTEM] new node %c has joined, its port is %d, ip %s", 
+             time_str, newn, newport, newip);
+    
+    log_to_history(helper, log_entry);
+
+    printf("Helper update done. Added to local nodes.dat and history.\n");
     return 0;
 }

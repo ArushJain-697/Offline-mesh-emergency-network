@@ -1,12 +1,12 @@
 // mesh_backend.c
-// Features: Auto-Accept Nodes + Sender ID + Timestamp
+// Features: Auto-Accept + Sender ID + Timestamp + Broadcast Tag + Chat History File
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <time.h>           // Added for timestamp
+#include <time.h>           
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <errno.h>
@@ -19,6 +19,8 @@
 
 static int sock_fd = -1;
 static char node_name = 'A';
+static char history_file[64]; // Filename for chat history
+
 static struct sockaddr_in my_addr;
 static struct sockaddr_in dest_addr;
 
@@ -34,6 +36,21 @@ struct NodeInfo {
 static struct NodeInfo nodes[MAX_NODES];
 static int node_count = 0;
 
+/* ---------------- HELPER: Get Current Time String ---------------- */
+static void get_time_str(char *buf, size_t size) {
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    strftime(buf, size, "%H:%M:%S", t);
+}
+
+/* ---------------- HELPER: Write to History File ---------------- */
+static void write_history(const char *entry) {
+    FILE *fp = fopen(history_file, "a"); // "a" means append
+    if (fp) {
+        fprintf(fp, "%s\n", entry);
+        fclose(fp);
+    }
+}
 
 /* ---------------- load nodes.dat ---------------- */
 static void load_nodes_file(void) {
@@ -61,7 +78,6 @@ static void load_nodes_file(void) {
     fclose(fp);
 }
 
-
 /* ---------------- save nodes.dat ---------------- */
 static void save_nodes_file(void) {
     FILE *fp = fopen(NODES_DATA_FILE, "w");
@@ -77,7 +93,6 @@ static void save_nodes_file(void) {
     fclose(fp);
 }
 
-
 /* ---------------- find node ---------------- */
 static int find_node_index(char name) {
     for (int i = 0; i < node_count; i++)
@@ -85,7 +100,6 @@ static int find_node_index(char name) {
             return i;
     return -1;
 }
-
 
 /* ---------------- add/update node ---------------- */
 static void add_or_update_node(char name, const char *ip, int port) {
@@ -105,10 +119,12 @@ static void add_or_update_node(char name, const char *ip, int port) {
     save_nodes_file();
 }
 
-
 /* ---------------- init backend ---------------- */
 void backend_init(char name) {
     node_name = name;
+    
+    // Set the history filename, e.g., "chat_history_A.txt"
+    snprintf(history_file, sizeof(history_file), "chat_history_%c.txt", name);
 
     load_nodes_file();
 
@@ -142,10 +158,10 @@ void backend_init(char name) {
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     printf("Backend started for %c on port %d\n", node_name, my_port);
+    printf("Chat history will be saved to: %s\n", history_file);
 }
 
-
-/* ---------------- send message (UPDATED) ---------------- */
+/* ---------------- send message ---------------- */
 void backend_send_message(char to, const char *msg) {
     int idx = find_node_index(to);
     if (idx < 0) { printf("Unknown node %c\n", to); return; }
@@ -155,7 +171,7 @@ void backend_send_message(char to, const char *msg) {
     dest_addr.sin_port = htons(nodes[idx].port);
     dest_addr.sin_addr.s_addr = inet_addr(nodes[idx].ip);
 
-    // NEW: Prepare packet as "Sender|Message"
+    // Prepare packet: "Sender|Message"
     char packet[1100];
     snprintf(packet, sizeof(packet), "%c|%s", node_name, msg);
 
@@ -163,16 +179,19 @@ void backend_send_message(char to, const char *msg) {
         (struct sockaddr *)&dest_addr, sizeof(dest_addr));
 
     sent_count++;
+
+    // LOG TO FILE
+    char time_str[16];
+    get_time_str(time_str, sizeof(time_str));
+    char log_entry[1200];
+    snprintf(log_entry, sizeof(log_entry), "[%s] Me -> %c: %s", time_str, to, msg);
+    write_history(log_entry);
 }
 
-
-/* ---------------- broadcast (UPDATED) ---------------- */
-/* ---------------- broadcast (UPDATED) ---------------- */
+/* ---------------- broadcast ---------------- */
 void backend_broadcast(const char *msg) {
+    // Prepare packet: "Sender|(broadcasted) Message"
     char packet[1100];
-
-    // FIX: We prepend "(broadcasted)" to the message here.
-    // The receiver will see: "From A at 14:30: (broadcasted) Hello"
     snprintf(packet, sizeof(packet), "%c|(broadcasted) %s", node_name, msg);
 
     for (int i = 0; i < node_count; i++) {
@@ -187,10 +206,16 @@ void backend_broadcast(const char *msg) {
             (struct sockaddr *)&dest_addr, sizeof(dest_addr));
     }
     sent_count++;
+
+    // LOG TO FILE
+    char time_str[16];
+    get_time_str(time_str, sizeof(time_str));
+    char log_entry[1200];
+    snprintf(log_entry, sizeof(log_entry), "[%s] Me -> ALL (Broadcast): %s", time_str, msg);
+    write_history(log_entry);
 }
 
-
-/* ---------------- receive (UPDATED) ---------------- */
+/* ---------------- receive ---------------- */
 int backend_receive(char *out, int max_len) {
     char buf[1024];
 
@@ -213,11 +238,16 @@ int backend_receive(char *out, int max_len) {
             printf("\n*** NEW NODE REQUEST DETECTED ***\n");
             printf("Node: %c | IP: %s | Port: %d\n", newName, newIP, newPort);
             
-            // Auto-accept (No inputs allowed here)
+            // Auto-accept
             add_or_update_node(newName, newIP, newPort);
             printf(">>> Auto-accepted node %c into mesh.\n", newName);
             printf("Choose: ");
             fflush(stdout);
+
+            // Log System Event
+            char log_entry[256];
+            snprintf(log_entry, sizeof(log_entry), "[SYSTEM] Auto-accepted new node: %c", newName);
+            write_history(log_entry);
 
         } else {
             printf("Malformed NET_ADD message.\n");
@@ -228,31 +258,30 @@ int backend_receive(char *out, int max_len) {
 
     /* ---------------- NORMAL MESSAGE LOGIC ---------------- */
     
-    // 1. Get Current Time
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
+    // 1. Get Time
     char time_str[16];
-    strftime(time_str, sizeof(time_str), "%H:%M:%S", t);
+    get_time_str(time_str, sizeof(time_str));
 
     // 2. Check for Sender Header "X|Message"
     char *sep = strchr(buf, '|');
     if (sep != NULL) {
-        // We found the separator!
         char sender_char = buf[0];
         char *actual_msg = sep + 1;
 
-        // Format: "From A at 14:30: Hello"
+        // Format for Display and Log
         snprintf(out, max_len, "From %c at %s: %s", sender_char, time_str, actual_msg);
     } 
     else {
-        // Old format fallback (if unknown sender)
+        // Fallback
         snprintf(out, max_len, "From ? at %s: %s", time_str, buf);
     }
+
+    // LOG TO FILE (Log exactly what is shown on screen)
+    write_history(out);
 
     recv_count++;
     return bytes;
 }
-
 
 /* ---------------- close ---------------- */
 void backend_close(void) {

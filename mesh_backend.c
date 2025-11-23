@@ -1,5 +1,6 @@
 // mesh_backend.c
 // Features: Auto-Accept + Sender ID + Timestamp + Broadcast Tag + Chat History File
+// Update: "New node joined" detailed message
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -236,7 +237,13 @@ int backend_receive(char *out, int max_len) {
 
         if (sscanf(buf + 8, "%c:%63[^:]:%d", &newName, newIP, &newPort) == 3) {
             printf("\n*** NEW NODE REQUEST DETECTED ***\n");
-            printf("Node: %c | IP: %s | Port: %d\n", newName, newIP, newPort);
+            
+            // 1. Prepare the detailed message string
+            char msg[256];
+            snprintf(msg, sizeof(msg), "new node %c has joined, its port is %d, ip %s", 
+                     newName, newPort, newIP);
+
+            printf("%s\n", msg);
             
             // Auto-accept
             add_or_update_node(newName, newIP, newPort);
@@ -244,9 +251,11 @@ int backend_receive(char *out, int max_len) {
             printf("Choose: ");
             fflush(stdout);
 
-            // Log System Event
-            char log_entry[256];
-            snprintf(log_entry, sizeof(log_entry), "[SYSTEM] Auto-accepted new node: %c", newName);
+            // 2. Log System Event with timestamp
+            char time_str[16];
+            get_time_str(time_str, sizeof(time_str));
+            char log_entry[512];
+            snprintf(log_entry, sizeof(log_entry), "[%s] [SYSTEM] %s", time_str, msg);
             write_history(log_entry);
 
         } else {

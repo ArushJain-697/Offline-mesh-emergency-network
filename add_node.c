@@ -1,12 +1,3 @@
-// new.c
-// Simple helper program to broadcast a new-node join message
-// Usage: ./new <HelperNodeLetter> <NewNodeLetter> <NewNodeIP> <NewNodePort>
-//
-// This will: 
-// 1. Update local nodes.dat with F
-// 2. Send NET_ADD:F... to all other nodes
-// 3. Log the event to Helper's chat history file
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,7 +5,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <time.h> // Added for timestamp
+#include <time.h>
 
 #define NODES_DATA_FILE "nodes.dat"
 #define MAX_LINE 256
@@ -26,14 +17,12 @@ struct Node {
     int port;
 };
 
-// --- Helper function to get time string ---
 void get_time_str(char *buf, size_t size) {
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
     strftime(buf, size, "%H:%M:%S", t);
 }
 
-// --- Helper function to append to history file ---
 void log_to_history(char helper_node, const char *msg) {
     char filename[64];
     snprintf(filename, sizeof(filename), "chat_history_%c.txt", helper_node);
@@ -93,7 +82,6 @@ int main(int argc, char **argv) {
     struct Node nodes[26];
     int count = load_nodes(nodes, 26);
 
-    // update helper's local nodes list: if new exists update, else append
     int found = 0;
     for (int i = 0; i < count; ++i) {
         if (nodes[i].name == newn) {
@@ -122,11 +110,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // prepare NET_ADD payload: simple string
     char payload[256];
     snprintf(payload, sizeof(payload), "NET_ADD:%c:%s:%d", newn, newip, newport);
 
-    // send UDP to all other nodes listed
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) {
         perror("socket");
@@ -134,7 +120,7 @@ int main(int argc, char **argv) {
     }
 
     for (int i = 0; i < count; ++i) {
-        if (nodes[i].name == helper) continue; // don't send to helper itself
+        if (nodes[i].name == helper) continue;
         struct sockaddr_in dest;
         memset(&dest, 0, sizeof(dest));
         dest.sin_family = AF_INET;
@@ -152,7 +138,6 @@ int main(int argc, char **argv) {
 
     close(sock);
     
-    // --- FINAL STEP: LOG TO HELPER HISTORY ---
     char time_str[16];
     get_time_str(time_str, sizeof(time_str));
     

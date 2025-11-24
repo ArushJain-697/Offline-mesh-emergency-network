@@ -42,10 +42,6 @@ This project implements a basic mesh network using UDP sockets in C. It allows n
     ```bash
     make
     ```
-    If a `Makefile` is not provided, you can compile the code manually:
-    ```bash
-    gcc -o mesh_cli mesh_cli.c mesh_backend.c add_node.c -lpthread
-    ```
 
 3.  **Create the `nodes.dat` file (if it doesn't exist):**
     The `nodes.dat` file stores information about the nodes in the network. You can create it manually or use the `add_node` utility to add the first node.
@@ -58,13 +54,21 @@ This project implements a basic mesh network using UDP sockets in C. It allows n
     ./add_node -h A -n B -i 127.0.0.1 -p 5001
     ```
     This command adds a node with the name 'B', IP address '127.0.0.1', and port '5001', using node 'A' as a helper.
+    Option B (Interactive Wizard): You can also use the easier interactive mode provided in the Makefile:
+    ```bash
+    make add
+    ```
+    Run the mesh network application: Use the Makefile shortcut to run the chat program:
+    ```bash
+    make chat
+    ```
 
-2.  **Run the mesh network application:**
+3.  **Run the mesh network application:**
     ```bash
     ./mesh_cli
     ```
 
-3.  **Interact with the CLI:**
+4.  **Interact with the CLI:**
     The CLI will prompt you to enter a node letter and then present a menu of options: send message, broadcast, or exit.
 
 ## 💻 Usage

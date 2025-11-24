@@ -1,102 +1,134 @@
-// mesh_cli.c — robust input version using fgets() to avoid stdin leftovers
+// mesh_cli.c
+// Main chat CLI using the auto-IP backend (backend_init_auto)
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <pthread.h>
-#include <unistd.h>
 #include <string.h>
-#include <ctype.h>
-
+#include <pthread.h>
 #include "mesh_backend.h"
 
-static volatile int running = 1;
+static char local_node = '?';
+static int running = 1;
 
-void *receiver_thread(void *x) {
-    char buffer[1024];
+void *receiver_thread_function(void *arg) {
+    (void)arg;
+    char buffer[700];
 
     while (running) {
-        int n = backend_receive(buffer, sizeof(buffer));
-
-        if (n > 0) {
-            printf("\n[RECEIVED] %s\n", buffer);
-            printf("Enter option: ");
+        int bytes = backend_receive(buffer, sizeof(buffer));
+        if (bytes > 0) {
+            printf("\n");
+            printf("+---------- MESSAGE RECEIVED ----------+\n");
+            printf("| %s\n", buffer);
+            printf("+--------------------------------------+\n");
+            printf("(%c) Enter choice: ", local_node);
             fflush(stdout);
-        } else {
-            usleep(100 * 1000);  // sleep 100ms
         }
     }
-
     return NULL;
 }
 
-/* Helper: get a trimmed line from stdin, returns 1 on success, 0 on EOF/error */
-static int get_line(char *out, size_t len) {
-    if (fgets(out, (int)len, stdin) == NULL) return 0;
-    /* remove trailing newline */
-    size_t l = strlen(out);
-    if (l > 0 && out[l-1] == '\n') out[l-1] = '\0';
+int read_line(char *buffer, int size) {
+    char *res = fgets(buffer, size, stdin);
+    if (!res) return 0;
+
+    int len = strlen(buffer);
+    if (len > 0 && buffer[len - 1] == '\n')
+        buffer[len - 1] = '\0';
+
     return 1;
 }
 
-int main() {
-    char me_char[8];
-    char line[1024];
+void print_menu(void) {
+    printf("\n");
+    printf("+============= RUDP MESH CHAT =============+\n");
+    printf("|  Node: %c                                 |\n", local_node);
+    printf("|  1. Send direct message                  |\n");
+    printf("|  2. Broadcast to all nodes               |\n");
+    printf("|  3. Quit                                 |\n");
+    printf("+==========================================+\n");
+    printf("(%c) Enter choice: ", local_node);
+    fflush(stdout);
+}
 
-    printf("Enter node letter (A/B/C/...): ");
-    if (!get_line(me_char, sizeof(me_char))) return 0;
-    char me = toupper((unsigned char)me_char[0]);
+int main(void) {
+    pthread_t rthread;
+    char inbuf[700], msg[600];
+    int choice;
+    char to_char;
 
-    backend_init(me);
+    printf("\n");
+    printf("+==========================================+\n");
+    printf("|     RELIABLE UDP MESH CHAT SYSTEM        |\n");
+    printf("|     Auto-IP + Distributed nodes.dat      |\n");
+    printf("+==========================================+\n\n");
 
-    pthread_t t;
-    if (pthread_create(&t, NULL, receiver_thread, NULL) != 0) {
-        perror("pthread_create");
+    // initialize backend automatically
+    if (backend_init_auto() != 0) {
+        printf("Backend init failed.\n");
         return 1;
     }
 
-    while (1) {
-        printf("\n1) Send message\n");
-        printf("2) Broadcast\n");
-        printf("3) Exit\n");
-        printf("Choose: ");
+    // After init, backend printed node; retrieve from file
+    FILE *fp = fopen("nodes.dat", "r");
+    if (fp) {
+        char n; char ip[64];
+        while (fscanf(fp, " %c %63s", &n, ip) == 2) {
+            if (strcmp(ip, "0.0.0.0") != 0) {
+                // guess local node by matching our IP again
+                // backend already printed correct node so let's trust it:
+                // find first non-zero entry that matches local node
+            }
+        }
+        fclose(fp);
+    }
 
-        if (!get_line(line, sizeof(line))) {
-            printf("Input error, exiting.\n");
+    // Ask backend what local node is (simple trick: backend prints node)
+    // OR store it globally; easiest solution:
+    extern char local_node_external;
+    local_node = local_node_external;
+
+    // Start receiver thread
+    pthread_create(&rthread, NULL, receiver_thread_function, NULL);
+
+    while (running) {
+        print_menu();
+
+        if (!read_line(inbuf, sizeof(inbuf)))
             break;
+
+        if (sscanf(inbuf, "%d", &choice) != 1) {
+            printf("Please enter a number.\n");
+            continue;
         }
 
-        int op = atoi(line);
+        if (choice == 1) {
+            printf("Enter destination node (A-E): ");
+            if (!read_line(inbuf, sizeof(inbuf))) continue;
+            sscanf(inbuf, " %c", &to_char);
 
-        if (op == 1) {
-            char dest_line[8];
-            char msg[512];
+            printf("Enter message: ");
+            if (!read_line(msg, sizeof(msg))) continue;
 
-            printf("Send to node: ");
-            if (!get_line(dest_line, sizeof(dest_line))) continue;
-            char to = toupper((unsigned char)dest_line[0]);
-
-            printf("Message: ");
-            if (!get_line(msg, sizeof(msg))) continue;
-
-            backend_send_message(to, msg);
+            backend_send_message(toupper(to_char), msg);
+            printf("[SENT] Direct message sent.\n");
         }
-        else if (op == 2) {
-            char msg[512];
-            printf("Broadcast message: ");
-            if (!get_line(msg, sizeof(msg))) continue;
+        else if (choice == 2) {
+            printf("Enter broadcast message: ");
+            if (!read_line(msg, sizeof(msg))) continue;
+
             backend_broadcast(msg);
+            printf("[SENT] Broadcast sent.\n");
         }
-        else if (op == 3) {
+        else if (choice == 3) {
             running = 0;
             break;
         }
         else {
-            printf("Invalid.\n");
+            printf("Invalid choice.\n");
         }
     }
 
     backend_close();
-    pthread_join(t, NULL);
-
     return 0;
 }

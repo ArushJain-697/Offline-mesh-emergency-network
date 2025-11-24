@@ -6,7 +6,6 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <time.h>
-
 #define NODES_DATA_FILE "nodes.dat"
 #define MAX_LINE 256
 #define MAX_IP_LEN 64
@@ -26,7 +25,6 @@ void get_time_str(char *buf, size_t size) {
 void log_to_history(char helper_node, const char *msg) {
     char filename[64];
     snprintf(filename, sizeof(filename), "chat_history_%c.txt", helper_node);
-    
     FILE *fp = fopen(filename, "a");
     if (fp) {
         fprintf(fp, "%s\n", msg);
@@ -73,7 +71,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Usage: %s <HelperNodeLetter> <NewNodeLetter> <NewNodeIP> <NewNodePort>\n", argv[0]);
         return 1;
     }
-
     char helper = toupper((unsigned char)argv[1][0]);
     char newn = toupper((unsigned char)argv[2][0]);
     char *newip = argv[3];

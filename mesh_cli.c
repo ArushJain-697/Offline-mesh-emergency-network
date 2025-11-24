@@ -4,17 +4,12 @@
 #include <unistd.h>
 #include <string.h>
 #include <ctype.h>
-
 #include "mesh_backend.h"
-
 static volatile int running = 1;
-
 void *receiver_thread(void *x) {
     char buffer[1024];
-
     while (running) {
         int n = backend_receive(buffer, sizeof(buffer));
-
         if (n > 0) {
             printf("\n[RECEIVED] %s\n", buffer);
             printf("Enter option: ");
@@ -23,57 +18,44 @@ void *receiver_thread(void *x) {
             usleep(100 * 1000);
         }
     }
-
     return NULL;
 }
-
 static int get_line(char *out, size_t len) {
     if (fgets(out, (int)len, stdin) == NULL) return 0;
     size_t l = strlen(out);
     if (l > 0 && out[l-1] == '\n') out[l-1] = '\0';
     return 1;
 }
-
 int main() {
     char me_char[8];
     char line[1024];
-
     printf("Enter node letter (A/B/C/...): ");
     if (!get_line(me_char, sizeof(me_char))) return 0;
     char me = toupper((unsigned char)me_char[0]);
-
     backend_init(me);
-
     pthread_t t;
     if (pthread_create(&t, NULL, receiver_thread, NULL) != 0) {
         perror("pthread_create");
         return 1;
     }
-
     while (1) {
         printf("\n1) Send message\n");
         printf("2) Broadcast\n");
         printf("3) Exit\n");
         printf("Choose: ");
-
         if (!get_line(line, sizeof(line))) {
             printf("Input error, exiting.\n");
             break;
         }
-
         int op = atoi(line);
-
         if (op == 1) {
             char dest_line[8];
             char msg[512];
-
             printf("Send to node: ");
             if (!get_line(dest_line, sizeof(dest_line))) continue;
             char to = toupper((unsigned char)dest_line[0]);
-
             printf("Message: ");
             if (!get_line(msg, sizeof(msg))) continue;
-
             backend_send_message(to, msg);
         }
         else if (op == 2) {
@@ -90,9 +72,7 @@ int main() {
             printf("Invalid.\n");
         }
     }
-
     backend_close();
     pthread_join(t, NULL);
-
     return 0;
 }

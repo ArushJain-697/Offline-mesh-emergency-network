@@ -1,12 +1,11 @@
-# Makefile - single file for building and running chat and add-new helper
 CC = gcc
 CFLAGS = -Wall -pthread
 
-# Binary names
+
 CHAT_BIN = mesh_cli
 NEW_BIN  = new
 
-# Source files (assumes these files are present in current directory)
+
 CHAT_SRCS = mesh_cli.c mesh_backend.c
 NEW_SRCS  = new.c
 
@@ -22,23 +21,19 @@ $(CHAT_BIN): $(CHAT_SRCS)
 $(NEW_BIN): $(NEW_SRCS)
 	$(CC) $(CFLAGS) -o $(NEW_BIN) $(NEW_SRCS)
 
-# Run the chat program (interactive)
-# Usage: make chat
+
 chat: $(CHAT_BIN)
 	@echo "Running chat program: ./$(CHAT_BIN)"
 	@./$(CHAT_BIN)
 
-# Shortcut that passes a node letter non-interactively
+
 chat_node: $(CHAT_BIN)
 ifndef NODE
 	$(error "Usage: make chat_node NODE=A")
 endif
 	@printf "%s\n" "$(NODE)" | ./$(CHAT_BIN)
 
-# -------------------------------------------------------------------------
-# UPDATED: Interactive "make add"
-# No more long commands. Just run "make add" and answer the prompts.
-# -------------------------------------------------------------------------
+
 add: $(NEW_BIN)
 	@echo "--- Add New Node Helper ---"
 	@printf "Enter YOUR Node Letter (Helper): "; read helper; \
@@ -49,8 +44,7 @@ add: $(NEW_BIN)
 	echo "Broadcasting new node $$new_node ($$new_ip:$$new_port) via $$helper..."; \
 	./$(NEW_BIN) $$helper $$new_node $$new_ip $$new_port
 
-# Create a minimal nodes.dat containing only A and B
-# Usage: make nodes_init IP_A=192.168.1.101 IP_B=192.168.1.102
+
 nodes_init:
 ifndef IP_A
 	$(error "Usage: make nodes_init IP_A=192.168.1.101 IP_B=192.168.1.102")

@@ -21,14 +21,16 @@ One of the key features of this project is that new laptops can join the mesh ne
 
 The system is implemented using the following files:
 
-mesh_cli.c - Handles the user interface for sending, receiving, and displaying chat messages.
+mesh_cli.c - Provides the chat menu, handles user input, and displays incoming messages.
 
-mesh_backend.c - Implements all networking logic: sending, receiving, broadcasting, and updating nodes.
+mesh_backend.c - Handles all networking: sending, receiving, auto-accepting new nodes, updating nodes.dat, and writing chat history.
 
-mesh_backend.h - Provides function declarations so the CLI can communicate with the backend.
+mesh_backend.h - Defines the backend functions used by the chat interface.
 
-nodes.dat – a text file that stores IP addresses and ports of all known nodes.
+nodes.dat – Stores all known node names, IP addresses, and ports for the mesh network.
 
-Makefile – automates compilation and provides simple commands like make chat and make add.
+Makefile – Compiles the chat program and runs commands like make chat and make add.
+
+chat_history_*.txt - Automatically saved chat logs and system messages for each node. (* replaces nodes for example A,B,C....)
 
 Overall, the project demonstrates how a decentralized communication system can be built without servers, using basic networking concepts. It shows message passing, broadcasting, and dynamic node discovery, all inside a small mesh network that expands as new nodes join. It is a working model of how distributed communication can function in environments like villages or disaster scenarios, where central servers may not be available.

@@ -1,5 +1,3 @@
-// mesh_cli.c — robust input version using fgets() to avoid stdin leftovers
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -22,17 +20,15 @@ void *receiver_thread(void *x) {
             printf("Enter option: ");
             fflush(stdout);
         } else {
-            usleep(100 * 1000);  // sleep 100ms
+            usleep(100 * 1000);
         }
     }
 
     return NULL;
 }
 
-/* Helper: get a trimmed line from stdin, returns 1 on success, 0 on EOF/error */
 static int get_line(char *out, size_t len) {
     if (fgets(out, (int)len, stdin) == NULL) return 0;
-    /* remove trailing newline */
     size_t l = strlen(out);
     if (l > 0 && out[l-1] == '\n') out[l-1] = '\0';
     return 1;

@@ -1,4 +1,4 @@
-// mesh_backend.c
+// mesh_backend.c (MacBook Fixed Version)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,14 +51,12 @@ static void init_nodes_default(void) {
     }
 }
 
-// Load nodes from file into RAM
 static void load_nodes_file(void) {
     pthread_mutex_lock(&file_lock);
     FILE *f = fopen(NODES_FILE, "r");
-    init_nodes_default(); // Reset RAM first
+    init_nodes_default();
     
     if (!f) {
-        // Create file if missing
         FILE *g = fopen(NODES_FILE, "w");
         if (g) {
             for (int i = 0; i < NODES_COUNT; ++i) fprintf(g, "%c %s\n", nodes[i].node, nodes[i].ip);
@@ -83,7 +81,6 @@ static void load_nodes_file(void) {
     pthread_mutex_unlock(&file_lock);
 }
 
-// Save RAM to file
 static void save_nodes_file(void) {
     pthread_mutex_lock(&file_lock);
     char tmpname[64];
@@ -98,7 +95,6 @@ static void save_nodes_file(void) {
     pthread_mutex_unlock(&file_lock);
 }
 
-// Helper: Build socket address
 static void build_sockaddr_for_index(int idx, struct sockaddr_in *out, int use_broadcast_if_empty) {
     memset(out, 0, sizeof(*out));
     out->sin_family = AF_INET;
@@ -112,7 +108,6 @@ static void build_sockaddr_for_index(int idx, struct sockaddr_in *out, int use_b
     }
 }
 
-// Compose file content for network transmission
 static int compose_nodes_file_contents(char *buf, int maxlen) {
     int off = 0;
     pthread_mutex_lock(&file_lock);
@@ -125,13 +120,11 @@ static int compose_nodes_file_contents(char *buf, int maxlen) {
     return off;
 }
 
-// Broadcasts our list to everyone (LAN + Known IPs)
 static void broadcast_nodes_update(void) {
     char payload[1024];
     int written = snprintf(payload, sizeof(payload), "[NODES_UPDATE]\n");
     int used = written + compose_nodes_file_contents(payload + written, (int)sizeof(payload) - written);
 
-    // 1. Send to known IPs (Unicast)
     for (int i = 0; i < NODES_COUNT; ++i) {
         if (nodes[i].node == local_node) continue;
         if (!ip_is_empty(nodes[i].ip)) {
@@ -141,7 +134,6 @@ static void broadcast_nodes_update(void) {
         }
     }
 
-    // 2. Send to Broadcast (Finds new nodes)
     struct sockaddr_in bdest;
     memset(&bdest, 0, sizeof(bdest));
     bdest.sin_family = AF_INET;
@@ -153,13 +145,10 @@ static void broadcast_nodes_update(void) {
 }
 
 static void handle_nodes_update(const char *payload) {
-    // Only update if something changed
     pthread_mutex_lock(&file_lock);
     struct NodeSlot tmp[NODES_COUNT];
-    // Copy current state
     for(int i=0; i<NODES_COUNT; i++) tmp[i] = nodes[i];
     
-    // Parse Payload
     const char *p = strstr(payload, "[NODES_UPDATE]");
     if (p) p += 14; else p = payload;
     
@@ -173,21 +162,18 @@ static void handle_nodes_update(const char *payload) {
         char n; char ip[64];
         if (sscanf(line, " %c %63s", &n, ip) == 2) {
             int idx = node_index_from_letter(toupper(n));
-            // Only update if the incoming IP is valid and not 0.0.0.0
             if (idx >= 0 && idx < NODES_COUNT && !ip_is_empty(ip)) {
                 strncpy(tmp[idx].ip, ip, sizeof(tmp[idx].ip)-1);
             }
         }
     }
     
-    // Commit changes
     for(int i=0; i<NODES_COUNT; i++) strncpy(nodes[i].ip, tmp[i].ip, sizeof(nodes[i].ip)-1);
-    
-    save_nodes_file(); // Save to disk
+    save_nodes_file();
     pthread_mutex_unlock(&file_lock);
 }
 
-// Receiver Thread
+// Receiver Thread (Fix: Handle shutdown gracefully)
 static void *receiver_thread_func(void *arg) {
     (void)arg;
     char buf[2048];
@@ -195,12 +181,16 @@ static void *receiver_thread_func(void *arg) {
         struct sockaddr_in from;
         socklen_t flen = sizeof(from);
         ssize_t n = recvfrom(sockfd, buf, sizeof(buf)-1, 0, (struct sockaddr*)&from, &flen);
-        if (n <= 0) continue;
+        
+        if (n <= 0) {
+            // If stopped, break immediately
+            if (!running) break;
+            continue;
+        }
         buf[n] = '\0';
 
         if (strncmp(buf, "[NODES_UPDATE]", 14) == 0) {
             handle_nodes_update(buf);
-            // We don't print anything to STDOUT here to avoid messing up the UI
             continue; 
         }
     }
@@ -209,8 +199,25 @@ static void *receiver_thread_func(void *arg) {
 
 // ---- Public API ----
 
-// Detect Local IP (Tries Google DNS trick, falls back to Loopback)
+// IP Detection (Fix: Added macOS specific 'en0' check)
 static int detect_local_ip(char *out, int outlen) {
+    // 1. Try macOS command (Best for MacBook Air)
+    FILE *fp = popen("ipconfig getifaddr en0 2>/dev/null", "r");
+    if (fp) {
+        char buf[64];
+        if (fgets(buf, sizeof(buf), fp)) {
+            size_t len = strlen(buf);
+            if (len > 0 && buf[len-1] == '\n') buf[len-1] = 0;
+            if (strlen(buf) > 0) {
+                strncpy(out, buf, outlen - 1);
+                pclose(fp);
+                return 0;
+            }
+        }
+        pclose(fp);
+    }
+
+    // 2. Fallback: Google DNS trick (for others or if en0 fails)
     int s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s < 0) return -1;
     struct sockaddr_in remote;
@@ -238,7 +245,6 @@ int backend_init_auto(void) {
         strncpy(ipbuf, "127.0.0.1", sizeof(ipbuf)-1);
     }
 
-    // Find if we are already in the file (re-joining)
     int found_idx = -1;
     for (int i = 0; i < NODES_COUNT; ++i) {
         if (strcmp(nodes[i].ip, ipbuf) == 0) {
@@ -251,7 +257,6 @@ int backend_init_auto(void) {
         local_node = nodes[found_idx].node;
         strncpy(local_ip, nodes[found_idx].ip, sizeof(local_ip)-1);
     } else {
-        // Find empty slot
         int free_idx = -1;
         for (int i = 0; i < NODES_COUNT; ++i) {
             if (ip_is_empty(nodes[i].ip)) { free_idx = i; break; }
@@ -266,7 +271,6 @@ int backend_init_auto(void) {
         save_nodes_file();
     }
 
-    // Setup Socket
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     int yes=1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -285,8 +289,6 @@ int backend_init_auto(void) {
 
     running = 1;
     pthread_create(&receiver_thread, NULL, receiver_thread_func, NULL);
-
-    // Initial Announcement
     broadcast_nodes_update();
     
     printf("Initialized as Node %c (%s) on Port %d\n", local_node, local_ip, node_ports[idx]);
@@ -309,10 +311,9 @@ int backend_receive(char *out, int max_len) {
     if (n <= 0) return -1;
     buf[n] = '\0';
     
-    // If we catch an update here by accident (rare due to thread), handle it
     if (strncmp(buf, "[NODES_UPDATE]", 14) == 0) {
         handle_nodes_update(buf);
-        return 0; // Not a user message
+        return 0; 
     }
     
     strncpy(out, buf, max_len);
@@ -337,20 +338,29 @@ void backend_broadcast(const char *msg) {
     for (int i = 0; i < NODES_COUNT; ++i) {
         if (nodes[i].node == local_node) continue;
         struct sockaddr_in dest;
-        build_sockaddr_for_index(i, &dest, 1); // Allow broadcast
+        build_sockaddr_for_index(i, &dest, 1); 
         sendto(sockfd, packet, strlen(packet), 0, (struct sockaddr*)&dest, sizeof(dest));
     }
 }
 
 void backend_close(void) {
     running = 0;
-    if (sockfd >= 0) close(sockfd);
-    // Clear our slot and notify others
+    
+    // Fix: Shutdown socket specifically to wake up blocked recvfrom
+    if (sockfd >= 0) {
+        shutdown(sockfd, SHUT_RDWR);
+        close(sockfd);
+    }
+    
+    // Wait for thread to finish cleanly
+    pthread_join(receiver_thread, NULL);
+    sockfd = -1;
+
     int idx = node_index_from_letter(local_node);
     if (idx >= 0) {
         strncpy(nodes[idx].ip, "0.0.0.0", 63);
         save_nodes_file();
-        // Fire one last broadcast using a temp socket since main is closed
+        
         int s = socket(AF_INET, SOCK_DGRAM, 0);
         int yes=1;
         setsockopt(s, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));

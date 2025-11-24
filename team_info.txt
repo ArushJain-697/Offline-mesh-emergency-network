@@ -27,7 +27,7 @@ mesh_backend.c - Implements all networking logic: sending, receiving, broadcasti
 
 mesh_backend.h - Provides function declarations so the CLI can communicate with the backend.
 
-new.c - Helper tool that adds a new node to the mesh and notifies all existing nodes.
+add_node.c - Helper tool that adds a new node to the mesh and notifies all existing nodes.
 
 nodes.dat – Stores the IP addresses and ports of all known mesh nodes.
 

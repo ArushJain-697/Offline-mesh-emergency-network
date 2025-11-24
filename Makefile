@@ -1,10 +1,8 @@
 CC = gcc
 CFLAGS = -Wall -pthread
 
-
 CHAT_BIN = mesh_cli
 NEW_BIN  = new
-
 
 CHAT_SRCS = mesh_cli.c mesh_backend.c
 NEW_SRCS  = new.c
@@ -21,18 +19,15 @@ $(CHAT_BIN): $(CHAT_SRCS)
 $(NEW_BIN): $(NEW_SRCS)
 	$(CC) $(CFLAGS) -o $(NEW_BIN) $(NEW_SRCS)
 
-
 chat: $(CHAT_BIN)
 	@echo "Running chat program: ./$(CHAT_BIN)"
 	@./$(CHAT_BIN)
-
 
 chat_node: $(CHAT_BIN)
 ifndef NODE
 	$(error "Usage: make chat_node NODE=A")
 endif
 	@printf "%s\n" "$(NODE)" | ./$(CHAT_BIN)
-
 
 add: $(NEW_BIN)
 	@echo "--- Add New Node Helper ---"
@@ -43,7 +38,6 @@ add: $(NEW_BIN)
 	echo "---------------------------------------"; \
 	echo "Broadcasting new node $$new_node ($$new_ip:$$new_port) via $$helper..."; \
 	./$(NEW_BIN) $$helper $$new_node $$new_ip $$new_port
-
 
 nodes_init:
 ifndef IP_A

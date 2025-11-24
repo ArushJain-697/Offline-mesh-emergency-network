@@ -21,11 +21,11 @@ One of the key features of this project is that new laptops can join the mesh ne
 
 The system is implemented using the following files:
 
-mesh_cli.c
+mesh_cli.c - Handles the user interface for sending, receiving, and displaying chat messages.
 
-mesh_backend.c 
+mesh_backend.c - Implements all networking logic: sending, receiving, broadcasting, and updating nodes.
 
-mesh_backend.h
+mesh_backend.h - Provides function declarations so the CLI can communicate with the backend.
 
 nodes.dat – a text file that stores IP addresses and ports of all known nodes.
 

@@ -2,10 +2,10 @@ CC = gcc
 CFLAGS = -Wall -pthread
 
 CHAT_BIN = mesh_cli
-NEW_BIN  = new
+NEW_BIN  = add_node
 
 CHAT_SRCS = mesh_cli.c mesh_backend.c
-NEW_SRCS  = new.c
+NEW_SRCS  = add_node.c
 
 .PHONY: all build chat add nodes_init clean help
 

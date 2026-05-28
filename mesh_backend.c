@@ -18,13 +18,10 @@
 static int sock_fd = -1;
 static char node_name = 'A';
 static char history_file[64];
-
 static struct sockaddr_in my_addr;
-
 static int sent_count = 0;
 static int recv_count = 0;
 
-// FIX 1: mutex protecting nodes[] and node_count
 static pthread_mutex_t nodes_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct NodeInfo {
@@ -36,8 +33,6 @@ struct NodeInfo {
 static struct NodeInfo nodes[MAX_NODES];
 static int node_count = 0;
 
-// ─── Utilities ───────────────────────────────────────────────────────────────
-
 static void get_time_str(char *buf, size_t size) {
     time_t now = time(NULL);
     struct tm *t = localtime(&now);
@@ -46,20 +41,12 @@ static void get_time_str(char *buf, size_t size) {
 
 static void write_history(const char *entry) {
     FILE *fp = fopen(history_file, "a");
-    if (fp) {
-        fprintf(fp, "%s\n", entry);
-        fclose(fp);
-    }
+    if (fp) { fprintf(fp, "%s\n", entry); fclose(fp); }
 }
-
-// ─── Node table (always call with mutex held) ─────────────────────────────────
 
 static void load_nodes_file(void) {
     FILE *fp = fopen(NODES_DATA_FILE, "r");
-    if (!fp) {
-        printf("nodes.dat not found! Create it manually.\n");
-        return;
-    }
+    if (!fp) { printf("nodes.dat not found!\n"); return; }
     node_count = 0;
     char line[256];
     while (fgets(line, sizeof(line), fp) != NULL) {
@@ -67,7 +54,6 @@ static void load_nodes_file(void) {
         int port;
         if (sscanf(line, " %c %63s %d", &n, ip, &port) == 3) {
             nodes[node_count].name = n;
-            // FIX 2: guaranteed null termination
             strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
             nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
             nodes[node_count].port = port;
@@ -85,11 +71,9 @@ static void save_nodes_file(void) {
     fclose(fp);
 }
 
-// returns index or -1 — call with mutex held
 static int find_node_index(char name) {
     for (int i = 0; i < node_count; i++)
-        if (nodes[i].name == name)
-            return i;
+        if (nodes[i].name == name) return i;
     return -1;
 }
 
@@ -111,47 +95,36 @@ static void add_or_update_node(char name, const char *ip, int port) {
     pthread_mutex_unlock(&nodes_mutex);
 }
 
-// ─── NET_WELCOME — send full node list to new joiner ─────────────────────────
-
 static void send_welcome(char to_name) {
     pthread_mutex_lock(&nodes_mutex);
     int idx = find_node_index(to_name);
-    if (idx < 0) {
-        pthread_mutex_unlock(&nodes_mutex);
-        return;
-    }
+    if (idx < 0) { pthread_mutex_unlock(&nodes_mutex); return; }
 
-    // FIX 3: NET_WELCOME:A:10.10.0.2:9001,B:10.10.0.3:9002,...
     char payload[2048];
     int offset = snprintf(payload, sizeof(payload), "NET_WELCOME:");
     for (int i = 0; i < node_count; i++) {
-        if (nodes[i].name == to_name) continue; // new node already knows itself
+        if (nodes[i].name == to_name) continue;
         offset += snprintf(payload + offset, sizeof(payload) - offset,
                            "%c:%s:%d,", nodes[i].name, nodes[i].ip, nodes[i].port);
     }
-    // remove trailing comma
-    if (payload[offset - 1] == ',') payload[offset - 1] = '\0';
+    if (offset > 12 && payload[offset - 1] == ',') payload[offset - 1] = '\0';
 
+    in_addr_t addr = inet_addr(nodes[idx].ip);
+    if (addr == INADDR_NONE) {
+        printf("ERROR: bad IP for node %c\n", to_name);
+        pthread_mutex_unlock(&nodes_mutex);
+        return;
+    }
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
     dest.sin_family      = AF_INET;
     dest.sin_port        = htons(nodes[idx].port);
-
-    // FIX 4: inet_addr check
-    in_addr_t addr = inet_addr(nodes[idx].ip);
-    if (addr == INADDR_NONE) {
-        printf("ERROR: bad IP for node %c: %s\n", to_name, nodes[idx].ip);
-        pthread_mutex_unlock(&nodes_mutex);
-        return;
-    }
     dest.sin_addr.s_addr = addr;
     pthread_mutex_unlock(&nodes_mutex);
 
     sendto(sock_fd, payload, strlen(payload), 0,
            (struct sockaddr *)&dest, sizeof(dest));
 }
-
-// ─── Public API ──────────────────────────────────────────────────────────────
 
 void backend_init(char name) {
     node_name = name;
@@ -170,14 +143,10 @@ void backend_init(char name) {
     pthread_mutex_lock(&nodes_mutex);
     int my_port = -1;
     for (int i = 0; i < node_count; i++)
-        if (nodes[i].name == node_name)
-            my_port = nodes[i].port;
+        if (nodes[i].name == node_name) my_port = nodes[i].port;
     pthread_mutex_unlock(&nodes_mutex);
 
-    if (my_port == -1) {
-        printf("ERROR: Node %c not in nodes.dat\n", node_name);
-        exit(1);
-    }
+    if (my_port == -1) { printf("ERROR: Node %c not in nodes.dat\n", node_name); exit(1); }
 
     my_addr.sin_port        = htons(my_port);
     my_addr.sin_addr.s_addr = INADDR_ANY;
@@ -196,20 +165,14 @@ void backend_init(char name) {
 void backend_send_message(char to, const char *msg) {
     pthread_mutex_lock(&nodes_mutex);
     int idx = find_node_index(to);
-    if (idx < 0) {
-        pthread_mutex_unlock(&nodes_mutex);
-        printf("Unknown node %c\n", to);
-        return;
-    }
+    if (idx < 0) { pthread_mutex_unlock(&nodes_mutex); printf("Unknown node %c\n", to); return; }
 
-    // FIX 4: inet_addr check
     in_addr_t addr = inet_addr(nodes[idx].ip);
     if (addr == INADDR_NONE) {
-        printf("ERROR: bad IP for node %c: %s\n", to, nodes[idx].ip);
+        printf("ERROR: bad IP for node %c\n", to);
         pthread_mutex_unlock(&nodes_mutex);
         return;
     }
-
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
     dest.sin_family      = AF_INET;
@@ -219,8 +182,7 @@ void backend_send_message(char to, const char *msg) {
 
     char packet[1100];
     snprintf(packet, sizeof(packet), "%c|%s", node_name, msg);
-    sendto(sock_fd, packet, strlen(packet), 0,
-           (struct sockaddr *)&dest, sizeof(dest));
+    sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest));
     sent_count++;
 
     char time_str[16];
@@ -235,7 +197,6 @@ void backend_broadcast(const char *msg) {
     snprintf(packet, sizeof(packet), "%c|(broadcasted) %s", node_name, msg);
 
     pthread_mutex_lock(&nodes_mutex);
-    // snapshot so we don't hold mutex during sendto
     struct NodeInfo snapshot[MAX_NODES];
     int snap_count = node_count;
     memcpy(snapshot, nodes, sizeof(struct NodeInfo) * node_count);
@@ -243,17 +204,14 @@ void backend_broadcast(const char *msg) {
 
     for (int i = 0; i < snap_count; i++) {
         if (snapshot[i].name == node_name) continue;
-
         in_addr_t addr = inet_addr(snapshot[i].ip);
-        if (addr == INADDR_NONE) continue; // FIX 4: skip bad IPs
-
+        if (addr == INADDR_NONE) continue;
         struct sockaddr_in dest;
         memset(&dest, 0, sizeof(dest));
         dest.sin_family      = AF_INET;
         dest.sin_port        = htons(snapshot[i].port);
         dest.sin_addr.s_addr = addr;
-        sendto(sock_fd, packet, strlen(packet), 0,
-               (struct sockaddr *)&dest, sizeof(dest));
+        sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest));
     }
     sent_count++;
 
@@ -273,63 +231,44 @@ int backend_receive(char *out, int max_len) {
     }
     buf[bytes] = '\0';
 
-    // ── Control: new node joining ────────────────────────────────────────────
     if (strncmp(buf, "NET_ADD:", 8) == 0) {
         char newName, newIP[64];
         int newPort;
         if (sscanf(buf + 8, "%c:%63[^:]:%d", &newName, newIP, &newPort) == 3) {
             add_or_update_node(newName, newIP, newPort);
-
-            // FIX 3: send new node the full list so it knows everyone
             send_welcome(newName);
-
-            printf("\n>>> Node %c joined (ip %s port %d) — welcomed.\n",
-                   newName, newIP, newPort);
-            printf("Choose: ");
-            fflush(stdout);
-
-            char time_str[16];
-            get_time_str(time_str, sizeof(time_str));
+            printf("\n>>> Node %c joined (%s:%d)\n", newName, newIP, newPort);
+            printf("Choose: "); fflush(stdout);
+            char time_str[16]; get_time_str(time_str, sizeof(time_str));
             char log_entry[512];
             snprintf(log_entry, sizeof(log_entry),
-                     "[%s] [SYSTEM] node %c joined ip %s port %d",
-                     time_str, newName, newIP, newPort);
+                     "[%s] [SYSTEM] node %c joined %s:%d", time_str, newName, newIP, newPort);
             write_history(log_entry);
-        } else {
-            printf("Malformed NET_ADD message.\n");
         }
         return 0;
     }
 
-    // ── Control: welcome packet (I am the new node) ──────────────────────────
     if (strncmp(buf, "NET_WELCOME:", 12) == 0) {
         char *cursor = buf + 12;
         char entry[128];
-        // parse comma separated  Name:IP:Port entries
         while (sscanf(cursor, "%127[^,]", entry) == 1) {
-            char n, ip[64];
-            int port;
+            char n, ip[64]; int port;
             if (sscanf(entry, "%c:%63[^:]:%d", &n, ip, &port) == 3)
                 add_or_update_node(n, ip, port);
             cursor = strchr(cursor, ',');
             if (!cursor) break;
-            cursor++; // skip comma
+            cursor++;
         }
-        printf("\n>>> Received network map from helper — %d nodes known.\n",
-               node_count);
-        printf("Choose: ");
-        fflush(stdout);
+        printf("\n>>> Got network map — %d nodes known.\n", node_count);
+        printf("Choose: "); fflush(stdout);
         return 0;
     }
 
-    // ── Data: normal chat message ─────────────────────────────────────────────
     char time_str[16];
     get_time_str(time_str, sizeof(time_str));
     char *sep = strchr(buf, '|');
     if (sep != NULL) {
-        char sender_char = buf[0];
-        char *actual_msg = sep + 1;
-        snprintf(out, max_len, "From %c at %s: %s", sender_char, time_str, actual_msg);
+        snprintf(out, max_len, "From %c at %s: %s", buf[0], time_str, sep + 1);
     } else {
         snprintf(out, max_len, "From ? at %s: %s", time_str, buf);
     }

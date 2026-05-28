@@ -1,0 +1,16 @@
+# Node state files
+nodes.dat
+nodes_*.dat
+
+# Chat history logs
+chat_history_*.txt
+
+# Compiled binaries
+mesh_cli
+add_node
+
+# Object files
+*.o
+
+# macOS
+.DS_Store

@@ -5,7 +5,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "mesh_backend.h"
-static volatile int running = 1;
+static _Atomic int running = 1;
 void *receiver_thread(void *x) {
     char buffer[1024];
     while (running) {

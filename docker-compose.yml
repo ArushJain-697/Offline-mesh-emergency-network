@@ -1,0 +1,43 @@
+services:
+  node_a:
+    build: .
+    container_name: mesh_node_a
+    hostname: node_a
+    stdin_open: true
+    tty: true
+    networks:
+      mesh_net:
+        ipv4_address: 10.10.0.2
+    volumes:
+      - ./nodes.dat:/mesh/nodes.dat
+
+  node_b:
+    build: .
+    container_name: mesh_node_b
+    hostname: node_b
+    stdin_open: true
+    tty: true
+    networks:
+      mesh_net:
+        ipv4_address: 10.10.0.3
+    volumes:
+      - ./nodes.dat:/mesh/nodes.dat
+
+  node_c:
+    build: .
+    container_name: mesh_node_c
+    hostname: node_c
+    stdin_open: true
+    tty: true
+    networks:
+      mesh_net:
+        ipv4_address: 10.10.0.4
+    volumes:
+      - ./nodes.dat:/mesh/nodes.dat
+
+networks:
+  mesh_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.0.0/24

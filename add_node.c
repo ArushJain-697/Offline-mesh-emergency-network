@@ -139,7 +139,9 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < count; ++i)
     {
-        if (nodes[i].name == helper)
+        /* Skip the helper (already updated via nodes.dat) and the new node
+           itself (not running yet, or would receive a NET_ADD about itself). */
+        if (nodes[i].name == helper || nodes[i].name == newn)
             continue;
 
         in_addr_t addr = inet_addr(nodes[i].ip);

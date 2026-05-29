@@ -101,6 +101,10 @@ int main(int argc, char **argv)
     char helper = toupper((unsigned char)argv[1][0]);
     char *newip = argv[2];
     int newport = atoi(argv[3]);
+    if (newport <= 0 || newport > 65535) {
+        fprintf(stderr, "Invalid port number: %s\n", argv[3]);
+        return 1;
+    }
 
     struct Node nodes[26];
     int count = load_nodes(nodes, 26);

@@ -22,6 +22,13 @@ static struct sockaddr_in my_addr;
 static int sent_count = 0;
 static int recv_count = 0;
 
+/* RDT 3.0 State Tracking */
+static int send_seq[MAX_NODES] = {0};
+static int expected_seq[MAX_NODES] = {0};
+static _Atomic int ack_received = 0;
+static _Atomic int ack_expected = 0;
+static _Atomic char ack_from = '\0';
+
 static pthread_mutex_t nodes_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 struct NodeInfo {

@@ -5,6 +5,8 @@ services:
     hostname: node_a
     stdin_open: true
     tty: true
+    ports:
+      - "9001:9001/udp"   # exposes node A's UDP port to the host
     networks:
       mesh_net:
         ipv4_address: 10.10.0.2
@@ -15,6 +17,8 @@ services:
     hostname: node_b
     stdin_open: true
     tty: true
+    ports:
+      - "9002:9002/udp"   # exposes node B's UDP port to the host
     networks:
       mesh_net:
         ipv4_address: 10.10.0.3
@@ -25,6 +29,8 @@ services:
     hostname: node_c
     stdin_open: true
     tty: true
+    ports:
+      - "9003:9003/udp"   # exposes node C's UDP port to the host
     networks:
       mesh_net:
         ipv4_address: 10.10.0.4

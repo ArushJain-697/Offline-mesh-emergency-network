@@ -102,11 +102,20 @@ static void send_welcome(char to_name) {
 
     char payload[2048];
     int offset = snprintf(payload, sizeof(payload), "NET_WELCOME:");
+    int truncated = 0;
     for (int i = 0; i < node_count; i++) {
         if (nodes[i].name == to_name) continue;
+        /* Issue #2 fix: check remaining space before appending.
+           Each entry is at most "Z:255.255.255.255:65535," = 26 chars. */
+        if ((int)sizeof(payload) - offset < 30) {
+            truncated = 1;
+            break;
+        }
         offset += snprintf(payload + offset, sizeof(payload) - offset,
                            "%c:%s:%d,", nodes[i].name, nodes[i].ip, nodes[i].port);
     }
+    if (truncated)
+        printf("WARNING: NET_WELCOME payload truncated — node %c will have incomplete map.\n", to_name);
     if (offset > 12 && payload[offset - 1] == ',') payload[offset - 1] = '\0';
 
     in_addr_t addr = inet_addr(nodes[idx].ip);
@@ -211,9 +220,9 @@ void backend_broadcast(const char *msg) {
         dest.sin_family      = AF_INET;
         dest.sin_port        = htons(snapshot[i].port);
         dest.sin_addr.s_addr = addr;
-        sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest));
+        if (sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest)) > 0)
+            sent_count++;  /* Issue #3 fix: count each successful send, not just +1 for the whole broadcast */
     }
-    sent_count++;
 
     char time_str[16];
     get_time_str(time_str, sizeof(time_str));

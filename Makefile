@@ -41,13 +41,17 @@ add: $(NEW_BIN)
 
 nodes_init:
 ifndef IP_A
-	$(error "Usage: make nodes_init IP_A=192.168.1.101 IP_B=192.168.1.102")
+	$(error "Usage: make nodes_init IP_A=<ip> IP_B=<ip> [IP_C=<ip>]")
 endif
 ifndef IP_B
-	$(error "Usage: make nodes_init IP_A=192.168.1.101 IP_B=192.168.1.102")
+	$(error "Usage: make nodes_init IP_A=<ip> IP_B=<ip> [IP_C=<ip>]")
 endif
 	@echo "Creating nodes.dat with A=$(IP_A):9001 and B=$(IP_B):9002"
 	@printf "A %s 9001\nB %s 9002\n" "$(IP_A)" "$(IP_B)" > nodes.dat
+ifdef IP_C
+	@printf "C %s 9003\n" "$(IP_C)" >> nodes.dat
+	@echo "Also added C=$(IP_C):9003"
+endif
 	@echo "nodes.dat created:"
 	@cat nodes.dat
 

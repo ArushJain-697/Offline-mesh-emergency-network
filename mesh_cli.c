@@ -29,14 +29,22 @@ static int get_line(char *out, size_t len) {
     out[l - 1] = '\0';
   return 1;
 }
-int main() {
-  char me_char[8];
-  char line[1024];
-  printf("Enter node letter (A/B/C/...): ");
-  if (!get_line(me_char, sizeof(me_char)))
-    return 0;
-  char me = toupper((unsigned char)me_char[0]);
+int main(int argc, char **argv) {
+  char me;
+  if (argc >= 2) {
+    /* Letter passed as argument — assigned by add_node, guaranteed no collision. */
+    me = toupper((unsigned char)argv[1][0]);
+    printf("Starting as node %c (assigned by add_node)\n", me);
+  } else {
+    /* Fallback: prompt — use only if add_node told you this letter. */
+    char me_char[8];
+    printf("Enter node letter (must be the one assigned by add_node): ");
+    if (!get_line(me_char, sizeof(me_char)))
+      return 0;
+    me = toupper((unsigned char)me_char[0]);
+  }
   backend_init(me);
+
   pthread_t t;
   if (pthread_create(&t, NULL, receiver_thread, NULL) != 0) {
     perror("pthread_create");

@@ -77,48 +77,51 @@ int save_nodes(struct Node *nodes, int count)
     return 1;
 }
 
+/* Returns the next letter A-Z not already used in nodes[], or '\0' if full. */
+static char next_available_letter(struct Node *nodes, int count)
+{
+    for (char c = 'A'; c <= 'Z'; c++)
+    {
+        int taken = 0;
+        for (int i = 0; i < count; i++)
+            if (nodes[i].name == c) { taken = 1; break; }
+        if (!taken) return c;
+    }
+    return '\0';
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 5)
+    if (argc != 4)
     {
-        fprintf(stderr, "Usage: %s <HelperNodeLetter> <NewNodeLetter> <NewNodeIP> <NewNodePort>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <HelperNodeLetter> <NewNodeIP> <NewNodePort>\n", argv[0]);
+        fprintf(stderr, "  The new node's letter is auto-assigned (next free A-Z).\n");
         return 1;
     }
     char helper = toupper((unsigned char)argv[1][0]);
-    char newn = toupper((unsigned char)argv[2][0]);
-    char *newip = argv[3];
-    int newport = atoi(argv[4]);
+    char *newip = argv[2];
+    int newport = atoi(argv[3]);
 
     struct Node nodes[26];
     int count = load_nodes(nodes, 26);
 
-    int found = 0;
-    for (int i = 0; i < count; ++i)
+    /* Auto-assign: pick the next available letter so no two nodes collide. */
+    char newn = next_available_letter(nodes, count);
+    if (newn == '\0')
     {
-        if (nodes[i].name == newn)
-        {
-            strncpy(nodes[i].ip, newip, MAX_IP_LEN - 1);
-            nodes[i].ip[MAX_IP_LEN - 1] = '\0';
-            nodes[i].port = newport;
-            found = 1;
-            break;
-        }
+        fprintf(stderr, "Network is full — all 26 letters are taken.\n");
+        return 1;
     }
-    if (!found)
+    printf("Auto-assigned letter '%c' to new node at %s:%d\n", newn, newip, newport);
+    printf("Tell the new participant: run  ./mesh_cli %c\n", newn);
+
+    if (count < 26)
     {
-        if (count < 26)
-        {
-            nodes[count].name = newn;
-            nodes[count].port = newport;
-            strncpy(nodes[count].ip, newip, MAX_IP_LEN - 1);
-            nodes[count].ip[MAX_IP_LEN - 1] = '\0';
-            count++;
-        }
-        else
-        {
-            fprintf(stderr, "nodes.dat full, cannot add new node\n");
-            return 1;
-        }
+        nodes[count].name = newn;
+        nodes[count].port = newport;
+        strncpy(nodes[count].ip, newip, MAX_IP_LEN - 1);
+        nodes[count].ip[MAX_IP_LEN - 1] = '\0';
+        count++;
     }
 
     if (!save_nodes(nodes, count))

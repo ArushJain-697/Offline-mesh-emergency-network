@@ -27,17 +27,16 @@ chat_node: $(CHAT_BIN)
 ifndef NODE
 	$(error "Usage: make chat_node NODE=A")
 endif
-	@printf "%s\n" "$(NODE)" | ./$(CHAT_BIN)
+	@./$(CHAT_BIN) $(NODE)
 
 add: $(NEW_BIN)
 	@echo "--- Add New Node Helper ---"
 	@printf "Enter YOUR Node Letter (Helper): "; read helper; \
-	printf "Enter NEW Node Letter: "; read new_node; \
 	printf "Enter NEW Node IP: "; read new_ip; \
 	printf "Enter NEW Node Port: "; read new_port; \
 	echo "---------------------------------------"; \
-	echo "Broadcasting new node $$new_node ($$new_ip:$$new_port) via $$helper..."; \
-	./$(NEW_BIN) $$helper $$new_node $$new_ip $$new_port
+	echo "Adding new node ($$new_ip:$$new_port) via $$helper (letter auto-assigned)..."; \
+	./$(NEW_BIN) $$helper $$new_ip $$new_port
 
 nodes_init:
 ifndef IP_A

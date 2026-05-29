@@ -51,10 +51,15 @@ This project implements a basic mesh network using UDP sockets in C. It allows n
 1.  **Configure the nodes:**
     Use the `add_node` utility to add or update node information in the `nodes.dat` file.  For example:
     ```bash
-    ./add_node A B 127.0.0.1 5001
+    ./add_node A 127.0.0.1 5001
     ```
-    This command adds a node with the name 'B', IP address '127.0.0.1', and port '5001', using node 'A' as a helper.
-    The four positional arguments are: `<HelperNodeLetter> <NewNodeLetter> <NewNodeIP> <NewNodePort>`.
+    Arguments: `<HelperNodeLetter> <NewNodeIP> <NewNodePort>`
+    The new node's letter is **auto-assigned** (next free A–Z) — no two nodes can ever get the same letter.
+    The output will tell you the assigned letter, e.g.:
+    ```
+    Auto-assigned letter 'D' to new node at 127.0.0.1:5001
+    Tell the new participant: run  ./mesh_cli D
+    ```
 
     Option B (Interactive Wizard): You can also use the easier interactive mode provided in the Makefile:
     ```bash
@@ -66,8 +71,13 @@ This project implements a basic mesh network using UDP sockets in C. It allows n
     ```
 
 3.  **Run the mesh network application:**
+    Pass the letter assigned by `add_node` as the first argument:
     ```bash
-    ./mesh_cli
+    ./mesh_cli D
+    ```
+    Or use the Makefile shortcut:
+    ```bash
+    make chat_node NODE=D
     ```
 
 4.  **Interact with the CLI:**

@@ -50,6 +50,7 @@ int main(int argc, char **argv) {
     perror("pthread_create");
     return 1;
   }
+  char line[1024];   /* input buffer for menu choices */
   while (1) {
     printf("\n1) Send message\n");
     printf("2) Broadcast\n");

@@ -13,10 +13,8 @@ void *receiver_thread(void *x) {
     int n = backend_receive(buffer, sizeof(buffer));
     if (n > 0) {
       printf("\n[RECEIVED] %s\n", buffer);
-      printf("Enter option: ");
+      printf("Choose: ");
       fflush(stdout);
-    } else {
-      usleep(100 * 1000);
     }
   }
   return NULL;

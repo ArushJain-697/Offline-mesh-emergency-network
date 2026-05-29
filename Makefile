@@ -55,7 +55,7 @@ endif
 	@cat nodes.dat
 
 clean:
-	rm -f $(CHAT_BIN) $(NEW_BIN) .o chat_log_.txt nodes.dat
+	rm -f $(CHAT_BIN) $(NEW_BIN) *.o chat_log_*.txt nodes.dat
 
 help:
 	@echo "Makefile targets:"

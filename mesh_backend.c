@@ -332,25 +332,6 @@ void backend_bootstrap(int port, const char *password, const char *helper_ip, in
     if (crypto_init(password) != 0) { fprintf(stderr, "Crypto init failed\n"); exit(1); }
     discovery_init();
 
-    pthread_mutex_lock(&nodes_mutex);
-    load_nodes_file();
-    int found_self = 0;
-    for (int i = 0; i < node_count; i++) {
-        if (nodes[i].port == port) {
-            node_name = nodes[i].name;
-            found_self = 1;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&nodes_mutex);
-
-    if (found_self) {
-        snprintf(history_file, sizeof(history_file), "chat_history_%c.txt", node_name);
-        my_addr = addr;
-        printf("[BOOTSTRAP] Found self in nodes.dat as Node %c on port %d\n", node_name, port);
-        start_heartbeat_thread();
-        return;
-    }
 
     node_count = 0; 
     printf("[BOOTSTRAP] Searching for existing network on port %d...\n", port);

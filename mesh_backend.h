@@ -1,7 +1,8 @@
 #ifndef MESH_BACKEND_H
 #define MESH_BACKEND_H
 
-void backend_init(char name);
+void backend_init(char name);   /* kept for internal use by bootstrap */
+void backend_bootstrap(int port, const char *helper_ip, int helper_port);
 void backend_send_message(char to, const char *msg);
 void backend_broadcast(const char *msg);
 int backend_receive(char *out, int max_len);

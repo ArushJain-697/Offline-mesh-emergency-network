@@ -28,20 +28,23 @@ static int get_line(char *out, size_t len) {
   return 1;
 }
 int main(int argc, char **argv) {
-  char me;
-  if (argc >= 2) {
-    /* Letter passed as argument — assigned by add_node, guaranteed no collision. */
-    me = toupper((unsigned char)argv[1][0]);
-    printf("Starting as node %c (assigned by add_node)\n", me);
-  } else {
-    /* Fallback: prompt — use only if add_node told you this letter. */
-    char me_char[8];
-    printf("Enter node letter (must be the one assigned by add_node): ");
-    if (!get_line(me_char, sizeof(me_char)))
-      return 0;
-    me = toupper((unsigned char)me_char[0]);
+  /* Usage:
+       ./mesh_cli <port>                        — auto-discovery
+       ./mesh_cli <port> <helper_ip> <helper_port> — targeted bootstrap */
+  if (argc < 2) {
+    fprintf(stderr, "Usage: %s <port> [helper_ip helper_port]\n", argv[0]);
+    return 1;
   }
-  backend_init(me);
+  int my_port = atoi(argv[1]);
+  if (my_port <= 1024 || my_port > 65535) {
+    fprintf(stderr, "Port must be between 1025 and 65535\n");
+    return 1;
+  }
+
+  const char *helper_ip   = (argc >= 4) ? argv[2] : NULL;
+  int         helper_port = (argc >= 4) ? atoi(argv[3]) : 0;
+
+  backend_bootstrap(my_port, helper_ip, helper_port);
 
   pthread_t t;
   if (pthread_create(&t, NULL, receiver_thread, NULL) != 0) {

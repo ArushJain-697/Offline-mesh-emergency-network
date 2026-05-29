@@ -5,11 +5,13 @@
 #include <arpa/inet.h>
 #include <time.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netinet/in.h>
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include "mesh_backend.h"
+#include "mesh_discovery.h"
 
 #define MAX_NODES 26
 #define MAX_IP_LEN 64
@@ -176,6 +178,130 @@ void backend_init(char name) {
     printf("Chat history will be saved to: %s\n", history_file);
 }
 
+/* ── Callback registered with mesh_discovery ──────────────────────
+   Called when a NET_DISCOVER packet arrives on disc_fd.
+   Assigns the next available letter, adds the peer, broadcasts
+   NET_ADD to everyone, then sends NET_WELCOME back.            */
+static char next_available_letter(void) {
+    for (char c = 'A'; c <= 'Z'; c++) {
+        if (find_node_index(c) < 0) return c;
+    }
+    return '\0';
+}
+
+static void on_new_peer_discovered(const char *ip, int port) {
+    pthread_mutex_lock(&nodes_mutex);
+    char letter = next_available_letter();
+    if (letter == '\0') {
+        pthread_mutex_unlock(&nodes_mutex);
+        printf("[DISCOVERY] Network full, rejecting peer %s:%d\n", ip, port);
+        return;
+    }
+    /* Add to local registry */
+    nodes[node_count].name = letter;
+    strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
+    nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
+    nodes[node_count].port = port;
+    node_count++;
+    save_nodes_file();
+    pthread_mutex_unlock(&nodes_mutex);
+
+    /* Broadcast NET_ADD to all existing peers */
+    char add_pkt[128];
+    snprintf(add_pkt, sizeof(add_pkt), "NET_ADD:%c:%s:%d", letter, ip, port);
+    struct NodeInfo snapshot[MAX_NODES];
+    int snap_count;
+    pthread_mutex_lock(&nodes_mutex);
+    snap_count = node_count;
+    memcpy(snapshot, nodes, sizeof(struct NodeInfo) * node_count);
+    pthread_mutex_unlock(&nodes_mutex);
+    for (int i = 0; i < snap_count; i++) {
+        if (snapshot[i].name == letter || snapshot[i].name == node_name) continue;
+        struct sockaddr_in d = {0};
+        d.sin_family = AF_INET;
+        d.sin_port   = htons(snapshot[i].port);
+        if (inet_pton(AF_INET, snapshot[i].ip, &d.sin_addr) > 0)
+            sendto(sock_fd, add_pkt, strlen(add_pkt), 0,
+                   (struct sockaddr *)&d, sizeof(d));
+    }
+
+    /* Send full network map back to the new peer */
+    send_welcome(letter);
+    printf("\n>>> Node %c joined via discovery (%s:%d)\nChoose: ",
+           letter, ip, port);
+    fflush(stdout);
+}
+
+void backend_bootstrap(int port, const char *helper_ip, int helper_port) {
+    /* Step 1: Open personal chat socket */
+    sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock_fd < 0) { perror("socket"); exit(1); }
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(sock_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        perror("bind"); exit(1);
+    }
+    struct timeval tv = {1, 0};
+    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    /* Step 2: Open discovery socket (port 9000) */
+    discovery_init();
+
+    /* Step 3: Try to find existing network */
+    printf("[BOOTSTRAP] Searching for existing network on port %d...\n", port);
+    char *welcome = discovery_bootstrap(sock_fd, port, helper_ip, helper_port);
+
+    if (welcome == NULL) {
+        /* Nobody answered → become Genesis node */
+        char my_ip[MAX_IP_LEN];
+        discovery_get_my_ip(my_ip, sizeof(my_ip));
+        node_name = 'A';
+        pthread_mutex_lock(&nodes_mutex);
+        nodes[0].name = 'A';
+        strncpy(nodes[0].ip, my_ip, MAX_IP_LEN - 1);
+        nodes[0].port = port;
+        node_count = 1;
+        save_nodes_file();
+        pthread_mutex_unlock(&nodes_mutex);
+        printf("[BOOTSTRAP] No peers found. Starting as Genesis Node A (%s:%d)\n",
+               my_ip, port);
+    } else {
+        /* Parse NET_WELCOME to build nodes[] and find own letter */
+        pthread_mutex_lock(&nodes_mutex);
+        node_count = 0;
+        char *cursor = welcome + 12; /* skip "NET_WELCOME:" */
+        char entry[128];
+        while (sscanf(cursor, "%127[^,]", entry) == 1) {
+            char n, ip[64]; int p;
+            if (sscanf(entry, "%c:%63[^:]:%d", &n, ip, &p) == 3) {
+                nodes[node_count].name = n;
+                strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
+                nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
+                nodes[node_count].port = p;
+                node_count++;
+                /* If this entry matches our port → we are this node */
+                if (p == port) node_name = n;
+            }
+            cursor = strchr(cursor, ',');
+            if (!cursor) break;
+            cursor++;
+        }
+        save_nodes_file();
+        pthread_mutex_unlock(&nodes_mutex);
+        free(welcome);
+        printf("[BOOTSTRAP] Joined network as Node %c on port %d\n",
+               node_name, port);
+    }
+
+    snprintf(history_file, sizeof(history_file),
+             "chat_history_%c.txt", node_name);
+    my_addr = addr;
+    printf("Chat history will be saved to: %s\n", history_file);
+}
+
 void backend_send_message(char to, const char *msg) {
     pthread_mutex_lock(&nodes_mutex);
     int idx = find_node_index(to);
@@ -262,12 +388,29 @@ void backend_broadcast(const char *msg) {
 }
 
 int backend_receive(char *out, int max_len) {
-    /* Bug fix #3: "From X at HH:MM:SS: " prefix is ~22 chars.
-       Limit what we read so the assembled string always fits in out[max_len]. */
     #define MSG_PREFIX_OVERHEAD 25
     char buf[1024];
     int read_limit = max_len - MSG_PREFIX_OVERHEAD - 1;
     if (read_limit <= 0 || read_limit > 1023) read_limit = 1023;
+
+    /* Use select() to watch both the chat socket and discovery socket */
+    int dfd = discovery_get_fd();
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(sock_fd, &rfds);
+    if (dfd >= 0) FD_SET(dfd, &rfds);
+    int maxfd = (dfd > sock_fd ? dfd : sock_fd) + 1;
+    struct timeval tv = {1, 0};
+    int ready = select(maxfd, &rfds, NULL, NULL, &tv);
+    if (ready <= 0) return 0;
+
+    /* Discovery socket has data → new node is knocking */
+    if (dfd >= 0 && FD_ISSET(dfd, &rfds)) {
+        discovery_handle_incoming(on_new_peer_discovered);
+        return 0;
+    }
+
+    /* Chat socket has data */
     int bytes = recvfrom(sock_fd, buf, read_limit, 0, NULL, NULL);
     if (bytes < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;

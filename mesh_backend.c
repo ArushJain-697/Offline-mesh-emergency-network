@@ -193,15 +193,44 @@ void backend_send_message(char to, const char *msg) {
     pthread_mutex_unlock(&nodes_mutex);
 
     char packet[1100];
-    snprintf(packet, sizeof(packet), "%c|%s", node_name, msg);
-    sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest));
-    sent_count++;
+    int to_idx = to - 'A';
+    if (to_idx < 0 || to_idx >= MAX_NODES) return;
+    int seq = send_seq[to_idx];
+    snprintf(packet, sizeof(packet), "DIR:%d:%c:%s", seq, node_name, msg);
 
-    char time_str[16];
-    get_time_str(time_str, sizeof(time_str));
-    char log_entry[1200];
-    snprintf(log_entry, sizeof(log_entry), "[%s] Me -> %c: %s", time_str, to, msg);
-    write_history(log_entry);
+    ack_expected = seq;
+    ack_from = to;
+    ack_received = 0;
+
+    int attempts = 0;
+    while (attempts < 3) {
+        sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest));
+        
+        for (int i = 0; i < 50; i++) {
+            if (ack_received == 1) break;
+            usleep(20 * 1000); // Wait 20ms chunks (total 1 second per attempt)
+        }
+        
+        if (ack_received == 1) break;
+        attempts++;
+        if (attempts < 3) {
+            printf("\n[SYSTEM] Retransmitting to %c (Attempt %d)...\nChoose: ", to, attempts + 1);
+            fflush(stdout);
+        }
+    }
+
+    if (ack_received == 1) {
+        send_seq[to_idx] = 1 - send_seq[to_idx];
+        sent_count++;
+        char time_str[16];
+        get_time_str(time_str, sizeof(time_str));
+        char log_entry[1200];
+        snprintf(log_entry, sizeof(log_entry), "[%s] Me -> %c: %s", time_str, to, msg);
+        write_history(log_entry);
+    } else {
+        printf("\n[ERROR] Message delivery to %c failed. Node might be offline.\nChoose: ", to);
+        fflush(stdout);
+    }
 }
 
 void backend_broadcast(const char *msg) {
@@ -300,6 +329,52 @@ int backend_receive(char *out, int max_len) {
         return 0;
     }
 
+    if (strncmp(buf, "ACK:", 4) == 0) {
+        int seq; char sender;
+        if (sscanf(buf + 4, "%d:%c", &seq, &sender) == 2) {
+            if (sender == ack_from && seq == ack_expected) {
+                ack_received = 1;
+            }
+        }
+        return 0;
+    }
+
+    if (strncmp(buf, "DIR:", 4) == 0) {
+        int seq; char sender;
+        char msg_content[1024];
+        if (sscanf(buf + 4, "%d:%c:%1023[^\n]", &seq, &sender, msg_content) == 3) {
+            char ack_pkt[32];
+            snprintf(ack_pkt, sizeof(ack_pkt), "ACK:%d:%c", seq, node_name);
+            pthread_mutex_lock(&nodes_mutex);
+            int idx = find_node_index(sender);
+            if (idx >= 0) {
+                struct sockaddr_in dest;
+                memset(&dest, 0, sizeof(dest));
+                dest.sin_family = AF_INET;
+                dest.sin_port = htons(nodes[idx].port);
+                inet_pton(AF_INET, nodes[idx].ip, &dest.sin_addr);
+                sendto(sock_fd, ack_pkt, strlen(ack_pkt), 0, (struct sockaddr *)&dest, sizeof(dest));
+            }
+            pthread_mutex_unlock(&nodes_mutex);
+            
+            int sender_idx = sender - 'A';
+            if (sender_idx >= 0 && sender_idx < MAX_NODES) {
+                if (seq == expected_seq[sender_idx]) {
+                    expected_seq[sender_idx] = 1 - expected_seq[sender_idx];
+                    char time_str[16]; get_time_str(time_str, sizeof(time_str));
+                    snprintf(out, max_len, "From %c at %s: %s", sender, time_str, msg_content);
+                    write_history(out);
+                    recv_count++;
+                    return strlen(out);
+                } else {
+                    return 0; /* Duplicate message, ACK was sent but we ignore the payload */
+                }
+            }
+        }
+        return 0;
+    }
+
+    /* Fallback for broadcasts which still use the old A|msg format */
     char time_str[16];
     get_time_str(time_str, sizeof(time_str));
     char *sep = strchr(buf, '|');

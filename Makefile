@@ -1,6 +1,9 @@
 CC = gcc
-CFLAGS = -Wall -pthread
-LDFLAGS = -lsodium
+
+# Detect libsodium location (Homebrew on Mac, system path on Linux/WSL)
+SODIUM_PREFIX := $(shell brew --prefix libsodium 2>/dev/null || echo /usr)
+CFLAGS  = -Wall -pthread -I$(SODIUM_PREFIX)/include
+LDFLAGS = -L$(SODIUM_PREFIX)/lib -lsodium
 
 CHAT_BIN  = mesh_cli
 CHAT_SRCS = mesh_cli.c mesh_backend.c mesh_discovery.c mesh_crypto.c

@@ -14,6 +14,8 @@
 #include "mesh_discovery.h"
 #include "mesh_crypto.h"
 
+static _Atomic int backend_running = 1;
+
 static ssize_t encrypted_sendto(int fd, const char *buf, size_t len,
                                  const struct sockaddr *dest, socklen_t dest_len)
 {
@@ -56,10 +58,12 @@ static _Atomic char ack_from = '\0';
 
 static pthread_mutex_t nodes_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+/* --- NEW: Added last_seen timestamp --- */
 struct NodeInfo {
     char name;
     char ip[MAX_IP_LEN];
     int port;
+    time_t last_seen; 
 };
 
 static struct NodeInfo nodes[MAX_NODES];
@@ -81,6 +85,7 @@ static void load_nodes_file(void) {
     if (!fp) { return; }
     node_count = 0;
     char line[256];
+    time_t now = time(NULL);
     while (fgets(line, sizeof(line), fp) != NULL) {
         char n, ip[MAX_IP_LEN];
         int port;
@@ -89,6 +94,7 @@ static void load_nodes_file(void) {
             strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
             nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
             nodes[node_count].port = port;
+            nodes[node_count].last_seen = now; /* Assume fresh on load */
             node_count++;
         }
     }
@@ -112,15 +118,18 @@ static int find_node_index(char name) {
 static void add_or_update_node(char name, const char *ip, int port) {
     pthread_mutex_lock(&nodes_mutex);
     int idx = find_node_index(name);
+    time_t now = time(NULL);
     if (idx >= 0) {
         strncpy(nodes[idx].ip, ip, MAX_IP_LEN - 1);
         nodes[idx].ip[MAX_IP_LEN - 1] = '\0';
         nodes[idx].port = port;
+        nodes[idx].last_seen = now;
     } else if (node_count < MAX_NODES) {
         nodes[node_count].name = name;
         strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
         nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
         nodes[node_count].port = port;
+        nodes[node_count].last_seen = now;
         node_count++;
     }
     save_nodes_file();
@@ -144,7 +153,7 @@ static void send_welcome(char to_name) {
                            "%c:%s:%d,", nodes[i].name, nodes[i].ip, nodes[i].port);
     }
     if (truncated)
-        printf("WARNING: NET_WELCOME payload truncated — node %c will have incomplete map.\n", to_name);
+        printf("WARNING: NET_WELCOME payload truncated.\n");
     if (offset > 12 && payload[offset - 1] == ',') payload[offset - 1] = '\0';
 
     struct sockaddr_in dest;
@@ -152,7 +161,6 @@ static void send_welcome(char to_name) {
     dest.sin_family      = AF_INET;
     dest.sin_port        = htons(nodes[idx].port);
     if (inet_pton(AF_INET, nodes[idx].ip, &dest.sin_addr) <= 0) {
-        printf("ERROR: bad IP for node %c\n", to_name);
         pthread_mutex_unlock(&nodes_mutex);
         return;
     }
@@ -160,6 +168,63 @@ static void send_welcome(char to_name) {
 
     encrypted_sendto(sock_fd, payload, strlen(payload),
            (struct sockaddr *)&dest, sizeof(dest));
+}
+
+/* --- NEW: The Background Heartbeat & Purge Thread --- */
+static void *heartbeat_loop(void *arg) {
+    while (backend_running) {
+        sleep(5); /* Beat every 5 seconds */
+        time_t now = time(NULL);
+        char hrt_pkt[32];
+        snprintf(hrt_pkt, sizeof(hrt_pkt), "HRT:%c", node_name);
+
+        pthread_mutex_lock(&nodes_mutex);
+        for (int i = 0; i < node_count; ) {
+            if (nodes[i].name == node_name) {
+                nodes[i].last_seen = now; /* Never purge ourselves */
+                i++;
+                continue;
+            }
+
+            /* 1. Fire Heartbeat */
+            struct sockaddr_in dest;
+            memset(&dest, 0, sizeof(dest));
+            dest.sin_family = AF_INET;
+            dest.sin_port = htons(nodes[i].port);
+            inet_pton(AF_INET, nodes[i].ip, &dest.sin_addr);
+            encrypted_sendto(sock_fd, hrt_pkt, strlen(hrt_pkt), (struct sockaddr *)&dest, sizeof(dest));
+
+            /* 2. Check for Death (15 seconds of silence) */
+            if (now - nodes[i].last_seen > 15) {
+                char dead_node = nodes[i].name;
+                
+                /* Shift array left to delete */
+                for (int j = i; j < node_count - 1; j++) {
+                    nodes[j] = nodes[j + 1];
+                }
+                node_count--;
+                save_nodes_file();
+                
+                printf("\r\033[K[SYSTEM] Node %c timed out (Ghost Node removed).\nChoose: ", dead_node);
+                fflush(stdout);
+                
+                char time_str[16]; get_time_str(time_str, sizeof(time_str));
+                char log_entry[128];
+                snprintf(log_entry, sizeof(log_entry), "[%s] [SYSTEM] Node %c timed out", time_str, dead_node);
+                write_history(log_entry);
+            } else {
+                i++;
+            }
+        }
+        pthread_mutex_unlock(&nodes_mutex);
+    }
+    return NULL;
+}
+
+static void start_heartbeat_thread(void) {
+    pthread_t hb_tid;
+    pthread_create(&hb_tid, NULL, heartbeat_loop, NULL);
+    pthread_detach(hb_tid);
 }
 
 void backend_init(char name) {
@@ -195,7 +260,7 @@ void backend_init(char name) {
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     printf("Backend started for %c on port %d\n", node_name, my_port);
-    printf("Chat history will be saved to: %s\n", history_file);
+    start_heartbeat_thread();
 }
 
 static char next_available_letter(void) {
@@ -206,9 +271,8 @@ static char next_available_letter(void) {
 }
 
 static void on_new_peer_discovered(const char *ip, int port) {
-    if (port == my_port_global) {
-        return;
-    }
+    if (port == my_port_global) return;
+    
     pthread_mutex_lock(&nodes_mutex);
     char letter = next_available_letter();
     if (letter == '\0') {
@@ -221,31 +285,32 @@ static void on_new_peer_discovered(const char *ip, int port) {
     strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
     nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
     nodes[node_count].port = port;
+    nodes[node_count].last_seen = time(NULL);
     node_count++;
     save_nodes_file();
     pthread_mutex_unlock(&nodes_mutex);
 
     char add_pkt[128];
     snprintf(add_pkt, sizeof(add_pkt), "NET_ADD:%c:%s:%d", letter, ip, port);
+    
     struct NodeInfo snapshot[MAX_NODES];
     int snap_count;
     pthread_mutex_lock(&nodes_mutex);
     snap_count = node_count;
     memcpy(snapshot, nodes, sizeof(struct NodeInfo) * node_count);
     pthread_mutex_unlock(&nodes_mutex);
+    
     for (int i = 0; i < snap_count; i++) {
         if (snapshot[i].name == letter || snapshot[i].name == node_name) continue;
         struct sockaddr_in d = {0};
         d.sin_family = AF_INET;
         d.sin_port   = htons(snapshot[i].port);
         if (inet_pton(AF_INET, snapshot[i].ip, &d.sin_addr) > 0)
-            encrypted_sendto(sock_fd, add_pkt, strlen(add_pkt),
-                   (struct sockaddr *)&d, sizeof(d));
+            encrypted_sendto(sock_fd, add_pkt, strlen(add_pkt), (struct sockaddr *)&d, sizeof(d));
     }
 
     send_welcome(letter);
-    printf("\r\033[K>>> Node %c joined via discovery (%s:%d)\nChoose: ",
-           letter, ip, port);
+    printf("\r\033[K>>> Node %c joined via discovery (%s:%d)\nChoose: ", letter, ip, port);
     fflush(stdout);
 }
 
@@ -264,9 +329,7 @@ void backend_bootstrap(int port, const char *password, const char *helper_ip, in
     struct timeval tv = {1, 0};
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    /* ---- Crypto init now takes the password from CLI ---- */
     if (crypto_init(password) != 0) { fprintf(stderr, "Crypto init failed\n"); exit(1); }
-
     discovery_init();
 
     pthread_mutex_lock(&nodes_mutex);
@@ -282,12 +345,10 @@ void backend_bootstrap(int port, const char *password, const char *helper_ip, in
     pthread_mutex_unlock(&nodes_mutex);
 
     if (found_self) {
-        snprintf(history_file, sizeof(history_file),
-                 "chat_history_%c.txt", node_name);
+        snprintf(history_file, sizeof(history_file), "chat_history_%c.txt", node_name);
         my_addr = addr;
-        printf("[BOOTSTRAP] Found self in nodes.dat as Node %c on port %d"
-               " — skipping discovery.\n", node_name, port);
-        printf("Chat history will be saved to: %s\n", history_file);
+        printf("[BOOTSTRAP] Found self in nodes.dat as Node %c on port %d\n", node_name, port);
+        start_heartbeat_thread();
         return;
     }
 
@@ -303,11 +364,11 @@ void backend_bootstrap(int port, const char *password, const char *helper_ip, in
         nodes[0].name = 'A';
         strncpy(nodes[0].ip, my_ip, MAX_IP_LEN - 1);
         nodes[0].port = port;
+        nodes[0].last_seen = time(NULL);
         node_count = 1;
         save_nodes_file();
         pthread_mutex_unlock(&nodes_mutex);
-        printf("[BOOTSTRAP] No peers found. Starting as Genesis Node A (%s:%d)\n",
-               my_ip, port);
+        printf("[BOOTSTRAP] No peers found. Starting as Genesis Node A (%s:%d)\n", my_ip, port);
     } else {
         pthread_mutex_lock(&nodes_mutex);
         node_count = 0;
@@ -320,6 +381,7 @@ void backend_bootstrap(int port, const char *password, const char *helper_ip, in
                 strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
                 nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
                 nodes[node_count].port = p;
+                nodes[node_count].last_seen = time(NULL);
                 node_count++;
                 if (p == port) node_name = n;
             }
@@ -330,14 +392,12 @@ void backend_bootstrap(int port, const char *password, const char *helper_ip, in
         save_nodes_file();
         pthread_mutex_unlock(&nodes_mutex);
         free(welcome);
-        printf("[BOOTSTRAP] Joined network as Node %c on port %d\n",
-               node_name, port);
+        printf("[BOOTSTRAP] Joined network as Node %c on port %d\n", node_name, port);
     }
 
-    snprintf(history_file, sizeof(history_file),
-             "chat_history_%c.txt", node_name);
+    snprintf(history_file, sizeof(history_file), "chat_history_%c.txt", node_name);
     my_addr = addr;
-    printf("Chat history will be saved to: %s\n", history_file);
+    start_heartbeat_thread();
 }
 
 void backend_send_message(char to, const char *msg) {
@@ -350,9 +410,7 @@ void backend_send_message(char to, const char *msg) {
     dest.sin_family      = AF_INET;
     dest.sin_port        = htons(nodes[idx].port);
     if (inet_pton(AF_INET, nodes[idx].ip, &dest.sin_addr) <= 0) {
-        printf("ERROR: bad IP for node %c\n", to);
-        pthread_mutex_unlock(&nodes_mutex);
-        return;
+        pthread_mutex_unlock(&nodes_mutex); return;
     }
     pthread_mutex_unlock(&nodes_mutex);
 
@@ -386,8 +444,7 @@ void backend_send_message(char to, const char *msg) {
     if (ack_received == 1) {
         send_seq[to_idx] = 1 - send_seq[to_idx];
         sent_count++;
-        char time_str[16];
-        get_time_str(time_str, sizeof(time_str));
+        char time_str[16]; get_time_str(time_str, sizeof(time_str));
         char log_entry[1200];
         snprintf(log_entry, sizeof(log_entry), "[%s] Me -> %c: %s", time_str, to, msg);
         write_history(log_entry);
@@ -418,8 +475,7 @@ void backend_broadcast(const char *msg) {
             sent_count++;  
     }
 
-    char time_str[16];
-    get_time_str(time_str, sizeof(time_str));
+    char time_str[16]; get_time_str(time_str, sizeof(time_str));
     char log_entry[1200];
     snprintf(log_entry, sizeof(log_entry), "[%s] Me -> ALL (Broadcast): %s", time_str, msg);
     write_history(log_entry);
@@ -446,24 +502,43 @@ int backend_receive(char *out, int max_len) {
         return 0;
     }
 
-    int bytes = encrypted_recvfrom(sock_fd, buf, read_limit, NULL, NULL);
+    /* --- NEW: Capture sender IP/Port so we can prove they are alive --- */
+    struct sockaddr_in sender_addr;
+    socklen_t sender_len = sizeof(sender_addr);
+    int bytes = encrypted_recvfrom(sock_fd, buf, read_limit, (struct sockaddr *)&sender_addr, &sender_len);
+    
     if (bytes < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
         return -1;
     }
     buf[bytes] = '\0';
 
+    /* Mark sender as alive immediately */
+    char sender_ip[64];
+    inet_ntop(AF_INET, &sender_addr.sin_addr, sender_ip, sizeof(sender_ip));
+    int sender_port = ntohs(sender_addr.sin_port);
+    
+    pthread_mutex_lock(&nodes_mutex);
+    for (int i = 0; i < node_count; i++) {
+        if (strcmp(nodes[i].ip, sender_ip) == 0 && nodes[i].port == sender_port) {
+            nodes[i].last_seen = time(NULL);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&nodes_mutex);
+
+    /* Ignore Heartbeat packets so they don't spam the chat */
+    if (strncmp(buf, "HRT:", 4) == 0) return 0;
+
     if (strncmp(buf, "NET_ADD:", 8) == 0) {
         char newName, newIP[64];
         int newPort;
         if (sscanf(buf + 8, "%c:%63[^:]:%d", &newName, newIP, &newPort) == 3) {
             add_or_update_node(newName, newIP, newPort);
-            printf("\r\033[K>>> Node %c added to network (%s:%d)\nChoose: ",
-                   newName, newIP, newPort); fflush(stdout);
+            printf("\r\033[K>>> Node %c added to network (%s:%d)\nChoose: ", newName, newIP, newPort); fflush(stdout);
             char time_str[16]; get_time_str(time_str, sizeof(time_str));
             char log_entry[512];
-            snprintf(log_entry, sizeof(log_entry),
-                     "[%s] [SYSTEM] node %c joined %s:%d", time_str, newName, newIP, newPort);
+            snprintf(log_entry, sizeof(log_entry), "[%s] [SYSTEM] node %c joined %s:%d", time_str, newName, newIP, newPort);
             write_history(log_entry);
         }
         return 0;
@@ -480,10 +555,10 @@ int backend_receive(char *out, int max_len) {
             if (!cursor) break;
             cursor++;
         }
-        printf("\r\033[K>>> Got network map — %d nodes known.\nChoose: ",
-               node_count); fflush(stdout);
+        printf("\r\033[K>>> Got network map — %d nodes known.\nChoose: ", node_count); fflush(stdout);
         return 0;
     }
+    
     if (strncmp(buf, "NET_LEAVE:", 10) == 0) {
         char left_node = buf[10];
         pthread_mutex_lock(&nodes_mutex);
@@ -499,8 +574,7 @@ int backend_receive(char *out, int max_len) {
         printf("\r\033[K>>> Node %c left the network\nChoose: ", left_node); fflush(stdout);
         char time_str[16]; get_time_str(time_str, sizeof(time_str));
         char log_entry[512];
-        snprintf(log_entry, sizeof(log_entry),
-                 "[%s] [SYSTEM] node %c left the network", time_str, left_node);
+        snprintf(log_entry, sizeof(log_entry), "[%s] [SYSTEM] node %c left the network", time_str, left_node);
         write_history(log_entry);
         return 0;
     }
@@ -550,8 +624,7 @@ int backend_receive(char *out, int max_len) {
         return 0;
     }
 
-    char time_str[16];
-    get_time_str(time_str, sizeof(time_str));
+    char time_str[16]; get_time_str(time_str, sizeof(time_str));
     char *sep = strchr(buf, '|');
     if (sep != NULL) {
         snprintf(out, max_len, "From %c at %s: %s", buf[0], time_str, sep + 1);
@@ -580,6 +653,7 @@ void backend_leave(void) {
 }
 
 void backend_close(void) {
+    backend_running = 0; /* Tells the heartbeat thread to shut down cleanly */
     if (sock_fd >= 0) {
         close(sock_fd);
         sock_fd = -1;

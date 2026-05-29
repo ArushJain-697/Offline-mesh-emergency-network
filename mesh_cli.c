@@ -12,8 +12,9 @@ void *receiver_thread(void *x) {
   while (running) {
     int n = backend_receive(buffer, sizeof(buffer));
     if (n > 0) {
-      printf("\n[RECEIVED] %s\n", buffer);
-      printf("Choose: ");
+      /* \r returns to start of line, \033[K erases to end of line.
+         This clears whatever the user was typing before printing. */
+      printf("\r\033[K[RECEIVED] %s\nChoose: ", buffer);
       fflush(stdout);
     }
   }

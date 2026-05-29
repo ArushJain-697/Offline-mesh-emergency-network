@@ -236,7 +236,7 @@ static void on_new_peer_discovered(const char *ip, int port) {
 
     /* Send full network map back to the new peer */
     send_welcome(letter);
-    printf("\n>>> Node %c joined via discovery (%s:%d)\nChoose: ",
+    printf("\r\033[K>>> Node %c joined via discovery (%s:%d)\nChoose: ",
            letter, ip, port);
     fflush(stdout);
 }
@@ -377,7 +377,7 @@ void backend_send_message(char to, const char *msg) {
         if (ack_received == 1) break;
         attempts++;
         if (attempts < 3) {
-            printf("\n[SYSTEM] Retransmitting to %c (Attempt %d)...\nChoose: ", to, attempts + 1);
+            printf("\r\033[K[SYSTEM] Retransmitting to %c (Attempt %d)...\nChoose: ", to, attempts + 1);
             fflush(stdout);
         }
     }
@@ -391,7 +391,7 @@ void backend_send_message(char to, const char *msg) {
         snprintf(log_entry, sizeof(log_entry), "[%s] Me -> %c: %s", time_str, to, msg);
         write_history(log_entry);
     } else {
-        printf("\n[ERROR] Message delivery to %c failed. Node might be offline.\nChoose: ", to);
+        printf("\r\033[K[ERROR] Message delivery to %c failed. Node might be offline.\nChoose: ", to);
         fflush(stdout);
     }
 }
@@ -460,9 +460,8 @@ int backend_receive(char *out, int max_len) {
         int newPort;
         if (sscanf(buf + 8, "%c:%63[^:]:%d", &newName, newIP, &newPort) == 3) {
             add_or_update_node(newName, newIP, newPort);
-            send_welcome(newName);
-            printf("\n>>> Node %c joined (%s:%d)\n", newName, newIP, newPort);
-            printf("Choose: "); fflush(stdout);
+            printf("\r\033[K>>> Node %c added to network (%s:%d)\nChoose: ",
+                   newName, newIP, newPort); fflush(stdout);
             char time_str[16]; get_time_str(time_str, sizeof(time_str));
             char log_entry[512];
             snprintf(log_entry, sizeof(log_entry),
@@ -483,8 +482,8 @@ int backend_receive(char *out, int max_len) {
             if (!cursor) break;
             cursor++;
         }
-        printf("\n>>> Got network map — %d nodes known.\n", node_count);
-        printf("Choose: "); fflush(stdout);
+        printf("\r\033[K>>> Got network map — %d nodes known.\nChoose: ",
+               node_count); fflush(stdout);
         return 0;
     }
     if (strncmp(buf, "NET_LEAVE:", 10) == 0) {
@@ -499,8 +498,7 @@ int backend_receive(char *out, int max_len) {
             save_nodes_file();
         }
         pthread_mutex_unlock(&nodes_mutex);
-        printf("\n>>> Node %c left the network\n", left_node);
-        printf("Choose: "); fflush(stdout);
+        printf("\r\033[K>>> Node %c left the network\nChoose: ", left_node); fflush(stdout);
         char time_str[16]; get_time_str(time_str, sizeof(time_str));
         char log_entry[512];
         snprintf(log_entry, sizeof(log_entry),

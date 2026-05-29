@@ -113,7 +113,8 @@ static void send_welcome(char to_name) {
     int offset = snprintf(payload, sizeof(payload), "NET_WELCOME:");
     int truncated = 0;
     for (int i = 0; i < node_count; i++) {
-        if (nodes[i].name == to_name) continue;
+        /* Include ALL nodes — the recipient needs its own entry to identify
+           its assigned letter by matching port == my_port in bootstrap. */
         /* Issue #2 fix: check remaining space before appending.
            Each entry is at most "Z:255.255.255.255:65535," = 26 chars. */
         if ((int)sizeof(payload) - offset < 30) {

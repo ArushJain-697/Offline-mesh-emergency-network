@@ -283,5 +283,11 @@ int backend_receive(char *out, int max_len) {
 }
 
 void backend_close(void) {
-    close(sock_fd);
+    /* Bug fix #4: guard against double-close. If called twice, or if the OS
+       reuses the fd number for another resource, the second close() would
+       silently corrupt an unrelated file descriptor. */
+    if (sock_fd >= 0) {
+        close(sock_fd);
+        sock_fd = -1;
+    }
 }

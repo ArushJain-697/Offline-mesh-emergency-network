@@ -76,7 +76,9 @@ int main() {
       printf("Invalid.\n");
     }
   }
-  backend_close();
+  /* Bug fix #5: join the receiver thread FIRST so it finishes its last
+     recvfrom() call before we close the socket underneath it. */
   pthread_join(t, NULL);
+  backend_close();
   return 0;
 }

@@ -3,11 +3,11 @@
 
 #include <stdint.h>
 
-/* Initialize crypto subsystem.
-   Loads mesh.key if it exists; generates and saves a new one if not.
+/* Initialize crypto subsystem using a password.
+   Generates a 32-byte key using libsodium's generic hash.
    Must be called before any encrypt/decrypt calls.
    Returns 0 on success, -1 on failure. */
-int crypto_init(void);
+int crypto_init(const char *password);
 
 /* Number of bytes added to every packet: nonce (24) + MAC (16) = 40. */
 int crypto_overhead(void);

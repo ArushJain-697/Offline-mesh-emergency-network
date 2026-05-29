@@ -3,8 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#define KEY_FILE "mesh.key"
-
 static uint8_t key[crypto_secretbox_KEYBYTES];
 static int initialized = 0;
 
@@ -15,45 +13,23 @@ int crypto_overhead(void) {
     /* 24 (nonce) + 16 (MAC) = 40 bytes per packet */
 }
 
-int crypto_init(void) {
+int crypto_init(const char *password) {
     if (sodium_init() < 0) {
         fprintf(stderr, "[CRYPTO] Failed to initialize libsodium\n");
         return -1;
     }
 
-    FILE *fp = fopen(KEY_FILE, "rb");
-    if (fp) {
-        /* Load existing key */
-        size_t n = fread(key, 1, sizeof(key), fp);
-        fclose(fp);
-        if (n != sizeof(key)) {
-            fprintf(stderr,
-                    "[CRYPTO] %s is corrupted (expected %zu bytes, got %zu). "
-                    "Delete it and restart.\n",
-                    KEY_FILE, sizeof(key), n);
-            return -1;
-        }
-        printf("[CRYPTO] Loaded key from %s\n", KEY_FILE);
-    } else {
-        /* Generate brand-new random key */
-        randombytes_buf(key, sizeof(key));
-
-        fp = fopen(KEY_FILE, "wb");
-        if (!fp) {
-            fprintf(stderr, "[CRYPTO] Cannot create %s\n", KEY_FILE);
-            return -1;
-        }
-        fwrite(key, 1, sizeof(key), fp);
-        fclose(fp);
-
-        printf("[CRYPTO] Generated new key — saved to %s\n", KEY_FILE);
-        printf("[CRYPTO] Share this file with every team member before they join.\n");
-        printf("[CRYPTO] Key (hex): ");
-        for (int i = 0; i < (int)sizeof(key); i++)
-            printf("%02x", key[i]);
-        printf("\n");
+    if (!password || strlen(password) == 0) {
+        fprintf(stderr, "[CRYPTO] Error: Password cannot be empty\n");
+        return -1;
     }
 
+    /* Hash the human-readable password into exactly 32 bytes */
+    crypto_generichash(key, sizeof(key), 
+                       (const unsigned char *)password, strlen(password), 
+                       NULL, 0);
+
+    printf("[CRYPTO] Network secured with password.\n");
     initialized = 1;
     return 0;
 }

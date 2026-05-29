@@ -14,10 +14,6 @@
 #include "mesh_discovery.h"
 #include "mesh_crypto.h"
 
-/* ── Transparent crypto wrappers ─────────────────────────────────
-   All UDP traffic is encrypted before send and decrypted after recv.
-   Use these everywhere instead of raw sendto / recvfrom.          */
-
 static ssize_t encrypted_sendto(int fd, const char *buf, size_t len,
                                  const struct sockaddr *dest, socklen_t dest_len)
 {
@@ -35,7 +31,7 @@ static int encrypted_recvfrom(int fd, char *buf, int buf_len,
     int raw_n = recvfrom(fd, raw, sizeof(raw), 0, src, src_len);
     if (raw_n <= 0) return raw_n;
     int plain_n = crypto_decrypt_packet(raw, raw_n, (uint8_t *)buf, buf_len - 1);
-    if (plain_n < 0) return 0; /* silently drop tampered / wrong-key packets */
+    if (plain_n < 0) return 0; 
     buf[plain_n] = '\0';
     return plain_n;
 }
@@ -47,12 +43,11 @@ static int encrypted_recvfrom(int fd, char *buf, int buf_len,
 static int sock_fd = -1;
 static char node_name = 'A';
 static char history_file[64];
-static int my_port_global = 0;  /* our own chat port, set at bind time */
+static int my_port_global = 0;  
 static struct sockaddr_in my_addr;
 static int sent_count = 0;
 static int recv_count = 0;
 
-/* RDT 3.0 State Tracking */
 static int send_seq[MAX_NODES] = {0};
 static int expected_seq[MAX_NODES] = {0};
 static _Atomic int ack_received = 0;
@@ -83,7 +78,7 @@ static void write_history(const char *entry) {
 
 static void load_nodes_file(void) {
     FILE *fp = fopen(NODES_DATA_FILE, "r");
-    if (!fp) { printf("nodes.dat not found!\n"); return; }
+    if (!fp) { return; }
     node_count = 0;
     char line[256];
     while (fgets(line, sizeof(line), fp) != NULL) {
@@ -141,10 +136,6 @@ static void send_welcome(char to_name) {
     int offset = snprintf(payload, sizeof(payload), "NET_WELCOME:");
     int truncated = 0;
     for (int i = 0; i < node_count; i++) {
-        /* Include ALL nodes — the recipient needs its own entry to identify
-           its assigned letter by matching port == my_port in bootstrap. */
-        /* Issue #2 fix: check remaining space before appending.
-           Each entry is at most "Z:255.255.255.255:65535," = 26 chars. */
         if ((int)sizeof(payload) - offset < 30) {
             truncated = 1;
             break;
@@ -207,10 +198,6 @@ void backend_init(char name) {
     printf("Chat history will be saved to: %s\n", history_file);
 }
 
-/* ── Callback registered with mesh_discovery ──────────────────────
-   Called when a NET_DISCOVER packet arrives on disc_fd.
-   Assigns the next available letter, adds the peer, broadcasts
-   NET_ADD to everyone, then sends NET_WELCOME back.            */
 static char next_available_letter(void) {
     for (char c = 'A'; c <= 'Z'; c++) {
         if (find_node_index(c) < 0) return c;
@@ -219,11 +206,7 @@ static char next_available_letter(void) {
 }
 
 static void on_new_peer_discovered(const char *ip, int port) {
-    /* Guard: ignore our own broadcast echoed back to us.
-       This happens on macOS where 255.255.255.255 broadcasts loop back
-       to the sender's own socket buffer before the receiver thread drains it. */
     if (port == my_port_global) {
-        printf("[DISCOVERY] Ignoring self-broadcast echo (port %d)\n", port);
         return;
     }
     pthread_mutex_lock(&nodes_mutex);
@@ -233,7 +216,7 @@ static void on_new_peer_discovered(const char *ip, int port) {
         printf("[DISCOVERY] Network full, rejecting peer %s:%d\n", ip, port);
         return;
     }
-    /* Add to local registry */
+    
     nodes[node_count].name = letter;
     strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
     nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
@@ -242,7 +225,6 @@ static void on_new_peer_discovered(const char *ip, int port) {
     save_nodes_file();
     pthread_mutex_unlock(&nodes_mutex);
 
-    /* Broadcast NET_ADD to all existing peers */
     char add_pkt[128];
     snprintf(add_pkt, sizeof(add_pkt), "NET_ADD:%c:%s:%d", letter, ip, port);
     struct NodeInfo snapshot[MAX_NODES];
@@ -261,15 +243,13 @@ static void on_new_peer_discovered(const char *ip, int port) {
                    (struct sockaddr *)&d, sizeof(d));
     }
 
-    /* Send full network map back to the new peer */
     send_welcome(letter);
     printf("\r\033[K>>> Node %c joined via discovery (%s:%d)\nChoose: ",
            letter, ip, port);
     fflush(stdout);
 }
 
-void backend_bootstrap(int port, const char *helper_ip, int helper_port) {
-    /* Step 1: Open personal chat socket */
+void backend_bootstrap(int port, const char *password, const char *helper_ip, int helper_port) {
     sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock_fd < 0) { perror("socket"); exit(1); }
 
@@ -280,20 +260,15 @@ void backend_bootstrap(int port, const char *helper_ip, int helper_port) {
     if (bind(sock_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind"); exit(1);
     }
-    my_port_global = port;  /* set before any broadcast so self-echo guard works */
+    my_port_global = port; 
     struct timeval tv = {1, 0};
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    /* Step 2: Open discovery socket (port 9000) */
-    /* Initialize encryption — must happen before any sendto/recvfrom */
-    if (crypto_init() != 0) { fprintf(stderr, "Crypto init failed\n"); exit(1); }
+    /* ---- CHANGED: Crypto init now takes the password from CLI ---- */
+    if (crypto_init(password) != 0) { fprintf(stderr, "Crypto init failed\n"); exit(1); }
 
     discovery_init();
 
-    /* ── Backward-compat fast path ─────────────────────────────────
-       If nodes.dat exists AND already contains an entry for our port,
-       we are a known node (e.g. a Docker container with baked-in dat).
-       Skip all discovery, load the file, and start immediately.     */
     pthread_mutex_lock(&nodes_mutex);
     load_nodes_file();
     int found_self = 0;
@@ -316,13 +291,11 @@ void backend_bootstrap(int port, const char *helper_ip, int helper_port) {
         return;
     }
 
-    /* No existing nodes.dat entry — run discovery */
-    node_count = 0; /* reset stale data from partial load */
+    node_count = 0; 
     printf("[BOOTSTRAP] Searching for existing network on port %d...\n", port);
     char *welcome = discovery_bootstrap(sock_fd, port, helper_ip, helper_port);
 
     if (welcome == NULL) {
-        /* Nobody answered → become Genesis node */
         char my_ip[MAX_IP_LEN];
         discovery_get_my_ip(my_ip, sizeof(my_ip));
         node_name = 'A';
@@ -336,10 +309,9 @@ void backend_bootstrap(int port, const char *helper_ip, int helper_port) {
         printf("[BOOTSTRAP] No peers found. Starting as Genesis Node A (%s:%d)\n",
                my_ip, port);
     } else {
-        /* Parse NET_WELCOME to build nodes[] and find own letter */
         pthread_mutex_lock(&nodes_mutex);
         node_count = 0;
-        char *cursor = welcome + 12; /* skip "NET_WELCOME:" */
+        char *cursor = welcome + 12; 
         char entry[128];
         while (sscanf(cursor, "%127[^,]", entry) == 1) {
             char n, ip[64]; int p;
@@ -349,7 +321,6 @@ void backend_bootstrap(int port, const char *helper_ip, int helper_port) {
                 nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
                 nodes[node_count].port = p;
                 node_count++;
-                /* If this entry matches our port → we are this node */
                 if (p == port) node_name = n;
             }
             cursor = strchr(cursor, ',');
@@ -369,254 +340,4 @@ void backend_bootstrap(int port, const char *helper_ip, int helper_port) {
     printf("Chat history will be saved to: %s\n", history_file);
 }
 
-void backend_send_message(char to, const char *msg) {
-    pthread_mutex_lock(&nodes_mutex);
-    int idx = find_node_index(to);
-    if (idx < 0) { pthread_mutex_unlock(&nodes_mutex); printf("Unknown node %c\n", to); return; }
-
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family      = AF_INET;
-    dest.sin_port        = htons(nodes[idx].port);
-    if (inet_pton(AF_INET, nodes[idx].ip, &dest.sin_addr) <= 0) {
-        printf("ERROR: bad IP for node %c\n", to);
-        pthread_mutex_unlock(&nodes_mutex);
-        return;
-    }
-    pthread_mutex_unlock(&nodes_mutex);
-
-    char packet[1100];
-    int to_idx = to - 'A';
-    if (to_idx < 0 || to_idx >= MAX_NODES) return;
-    int seq = send_seq[to_idx];
-    snprintf(packet, sizeof(packet), "DIR:%d:%c:%s", seq, node_name, msg);
-
-    ack_expected = seq;
-    ack_from = to;
-    ack_received = 0;
-
-    int attempts = 0;
-    while (attempts < 3) {
-        encrypted_sendto(sock_fd, packet, strlen(packet), (struct sockaddr *)&dest, sizeof(dest));
-        
-        for (int i = 0; i < 50; i++) {
-            if (ack_received == 1) break;
-            usleep(20 * 1000); // Wait 20ms chunks (total 1 second per attempt)
-        }
-        
-        if (ack_received == 1) break;
-        attempts++;
-        if (attempts < 3) {
-            printf("\r\033[K[SYSTEM] Retransmitting to %c (Attempt %d)...\nChoose: ", to, attempts + 1);
-            fflush(stdout);
-        }
-    }
-
-    if (ack_received == 1) {
-        send_seq[to_idx] = 1 - send_seq[to_idx];
-        sent_count++;
-        char time_str[16];
-        get_time_str(time_str, sizeof(time_str));
-        char log_entry[1200];
-        snprintf(log_entry, sizeof(log_entry), "[%s] Me -> %c: %s", time_str, to, msg);
-        write_history(log_entry);
-    } else {
-        printf("\r\033[K[ERROR] Message delivery to %c failed. Node might be offline.\nChoose: ", to);
-        fflush(stdout);
-    }
-}
-
-void backend_broadcast(const char *msg) {
-    char packet[1100];
-    snprintf(packet, sizeof(packet), "%c|(broadcasted) %s", node_name, msg);
-
-    pthread_mutex_lock(&nodes_mutex);
-    struct NodeInfo snapshot[MAX_NODES];
-    int snap_count = node_count;
-    memcpy(snapshot, nodes, sizeof(struct NodeInfo) * node_count);
-    pthread_mutex_unlock(&nodes_mutex);
-
-    for (int i = 0; i < snap_count; i++) {
-        if (snapshot[i].name == node_name) continue;
-        struct sockaddr_in dest;
-        memset(&dest, 0, sizeof(dest));
-        dest.sin_family      = AF_INET;
-        dest.sin_port        = htons(snapshot[i].port);
-        if (inet_pton(AF_INET, snapshot[i].ip, &dest.sin_addr) <= 0) continue;
-        if (encrypted_sendto(sock_fd, packet, strlen(packet), (struct sockaddr *)&dest, sizeof(dest)) > 0)
-            sent_count++;  /* Issue #3 fix: count each successful send, not just +1 for the whole broadcast */
-    }
-
-    char time_str[16];
-    get_time_str(time_str, sizeof(time_str));
-    char log_entry[1200];
-    snprintf(log_entry, sizeof(log_entry), "[%s] Me -> ALL (Broadcast): %s", time_str, msg);
-    write_history(log_entry);
-}
-
-int backend_receive(char *out, int max_len) {
-    #define MSG_PREFIX_OVERHEAD 25
-    char buf[1024];
-    int read_limit = max_len - MSG_PREFIX_OVERHEAD - 1;
-    if (read_limit <= 0 || read_limit > 1023) read_limit = 1023;
-
-    /* Use select() to watch both the chat socket and discovery socket */
-    int dfd = discovery_get_fd();
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(sock_fd, &rfds);
-    if (dfd >= 0) FD_SET(dfd, &rfds);
-    int maxfd = (dfd > sock_fd ? dfd : sock_fd) + 1;
-    struct timeval tv = {1, 0};
-    int ready = select(maxfd, &rfds, NULL, NULL, &tv);
-    if (ready <= 0) return 0;
-
-    /* Discovery socket has data → new node is knocking */
-    if (dfd >= 0 && FD_ISSET(dfd, &rfds)) {
-        discovery_handle_incoming(on_new_peer_discovered);
-        return 0;
-    }
-
-    /* Chat socket has data */
-    int bytes = encrypted_recvfrom(sock_fd, buf, read_limit, NULL, NULL);
-    if (bytes < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
-        return -1;
-    }
-    buf[bytes] = '\0';
-
-    if (strncmp(buf, "NET_ADD:", 8) == 0) {
-        char newName, newIP[64];
-        int newPort;
-        if (sscanf(buf + 8, "%c:%63[^:]:%d", &newName, newIP, &newPort) == 3) {
-            add_or_update_node(newName, newIP, newPort);
-            printf("\r\033[K>>> Node %c added to network (%s:%d)\nChoose: ",
-                   newName, newIP, newPort); fflush(stdout);
-            char time_str[16]; get_time_str(time_str, sizeof(time_str));
-            char log_entry[512];
-            snprintf(log_entry, sizeof(log_entry),
-                     "[%s] [SYSTEM] node %c joined %s:%d", time_str, newName, newIP, newPort);
-            write_history(log_entry);
-        }
-        return 0;
-    }
-
-    if (strncmp(buf, "NET_WELCOME:", 12) == 0) {
-        char *cursor = buf + 12;
-        char entry[128];
-        while (sscanf(cursor, "%127[^,]", entry) == 1) {
-            char n, ip[64]; int port;
-            if (sscanf(entry, "%c:%63[^:]:%d", &n, ip, &port) == 3)
-                add_or_update_node(n, ip, port);
-            cursor = strchr(cursor, ',');
-            if (!cursor) break;
-            cursor++;
-        }
-        printf("\r\033[K>>> Got network map — %d nodes known.\nChoose: ",
-               node_count); fflush(stdout);
-        return 0;
-    }
-    if (strncmp(buf, "NET_LEAVE:", 10) == 0) {
-        char left_node = buf[10];
-        pthread_mutex_lock(&nodes_mutex);
-        int idx = find_node_index(left_node);
-        if (idx >= 0) {
-            for (int i = idx; i < node_count - 1; i++) {
-                nodes[i] = nodes[i + 1];
-            }
-            node_count--;
-            save_nodes_file();
-        }
-        pthread_mutex_unlock(&nodes_mutex);
-        printf("\r\033[K>>> Node %c left the network\nChoose: ", left_node); fflush(stdout);
-        char time_str[16]; get_time_str(time_str, sizeof(time_str));
-        char log_entry[512];
-        snprintf(log_entry, sizeof(log_entry),
-                 "[%s] [SYSTEM] node %c left the network", time_str, left_node);
-        write_history(log_entry);
-        return 0;
-    }
-
-    if (strncmp(buf, "ACK:", 4) == 0) {
-        int seq; char sender;
-        if (sscanf(buf + 4, "%d:%c", &seq, &sender) == 2) {
-            if (sender == ack_from && seq == ack_expected) {
-                ack_received = 1;
-            }
-        }
-        return 0;
-    }
-
-    if (strncmp(buf, "DIR:", 4) == 0) {
-        int seq; char sender;
-        char msg_content[1024];
-        if (sscanf(buf + 4, "%d:%c:%1023[^\n]", &seq, &sender, msg_content) == 3) {
-            char ack_pkt[32];
-            snprintf(ack_pkt, sizeof(ack_pkt), "ACK:%d:%c", seq, node_name);
-            pthread_mutex_lock(&nodes_mutex);
-            int idx = find_node_index(sender);
-            if (idx >= 0) {
-                struct sockaddr_in dest;
-                memset(&dest, 0, sizeof(dest));
-                dest.sin_family = AF_INET;
-                dest.sin_port = htons(nodes[idx].port);
-                inet_pton(AF_INET, nodes[idx].ip, &dest.sin_addr);
-                encrypted_sendto(sock_fd, ack_pkt, strlen(ack_pkt), (struct sockaddr *)&dest, sizeof(dest));
-            }
-            pthread_mutex_unlock(&nodes_mutex);
-            
-            int sender_idx = sender - 'A';
-            if (sender_idx >= 0 && sender_idx < MAX_NODES) {
-                if (seq == expected_seq[sender_idx]) {
-                    expected_seq[sender_idx] = 1 - expected_seq[sender_idx];
-                    char time_str[16]; get_time_str(time_str, sizeof(time_str));
-                    snprintf(out, max_len, "From %c at %s: %s", sender, time_str, msg_content);
-                    write_history(out);
-                    recv_count++;
-                    return strlen(out);
-                } else {
-                    return 0; /* Duplicate message, ACK was sent but we ignore the payload */
-                }
-            }
-        }
-        return 0;
-    }
-
-    /* Fallback for broadcasts which still use the old A|msg format */
-    char time_str[16];
-    get_time_str(time_str, sizeof(time_str));
-    char *sep = strchr(buf, '|');
-    if (sep != NULL) {
-        snprintf(out, max_len, "From %c at %s: %s", buf[0], time_str, sep + 1);
-    } else {
-        snprintf(out, max_len, "From ? at %s: %s", time_str, buf);
-    }
-    write_history(out);
-    recv_count++;
-    return bytes;
-}
-void backend_leave(void) {
-    char packet[64];
-    snprintf(packet, sizeof(packet), "NET_LEAVE:%c", node_name);
-    pthread_mutex_lock(&nodes_mutex);
-    for (int i = 0; i < node_count; i++) {
-        if (nodes[i].name == node_name) continue;
-        struct sockaddr_in dest;
-        memset(&dest, 0, sizeof(dest));
-        dest.sin_family      = AF_INET;
-        dest.sin_port        = htons(nodes[i].port);
-        if (inet_pton(AF_INET, nodes[i].ip, &dest.sin_addr) <= 0) continue;
-        encrypted_sendto(sock_fd, packet, strlen(packet), (struct sockaddr *)&dest, sizeof(dest));
-    }
-    pthread_mutex_unlock(&nodes_mutex);
-}
-
-void backend_close(void) {
-    /* Bug fix #4: guard against double-close. If called twice, or if the OS
-       reuses the fd number for another resource, the second close() would
-       silently corrupt an unrelated file descriptor. */
-    if (sock_fd >= 0) {
-        close(sock_fd);
-        sock_fd = -1;
-    }
-}
+// ... [Keep backend_send_message, backend_broadcast, backend_receive, backend_leave, backend_close exactly the same] ...

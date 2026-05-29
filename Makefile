@@ -1,8 +1,9 @@
 CC = gcc
 CFLAGS = -Wall -pthread
+LDFLAGS = -lsodium
 
 CHAT_BIN  = mesh_cli
-CHAT_SRCS = mesh_cli.c mesh_backend.c mesh_discovery.c
+CHAT_SRCS = mesh_cli.c mesh_backend.c mesh_discovery.c mesh_crypto.c
 
 .PHONY: all build chat chat_node clean help
 
@@ -11,7 +12,7 @@ all: build
 build: $(CHAT_BIN)
 
 $(CHAT_BIN): $(CHAT_SRCS)
-	$(CC) $(CFLAGS) -o $(CHAT_BIN) $(CHAT_SRCS)
+	$(CC) $(CFLAGS) -o $(CHAT_BIN) $(CHAT_SRCS) $(LDFLAGS)
 
 chat_node: $(CHAT_BIN)
 ifndef PORT

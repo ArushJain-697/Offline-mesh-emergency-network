@@ -167,7 +167,7 @@ static void send_welcome(char to_name) {
     }
     pthread_mutex_unlock(&nodes_mutex);
 
-    encrypted_sendto(sock_fd, payload, strlen(payload),
+    sendto(sock_fd, payload, strlen(payload), 0,
            (struct sockaddr *)&dest, sizeof(dest));
 }
 
@@ -257,7 +257,7 @@ static void on_new_peer_discovered(const char *ip, int port) {
         d.sin_family = AF_INET;
         d.sin_port   = htons(snapshot[i].port);
         if (inet_pton(AF_INET, snapshot[i].ip, &d.sin_addr) > 0)
-            encrypted_sendto(sock_fd, add_pkt, strlen(add_pkt),
+            sendto(sock_fd, add_pkt, strlen(add_pkt), 0,
                    (struct sockaddr *)&d, sizeof(d));
     }
 
@@ -285,9 +285,6 @@ void backend_bootstrap(int port, const char *helper_ip, int helper_port) {
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     /* Step 2: Open discovery socket (port 9000) */
-    /* Initialize encryption — must happen before any sendto/recvfrom */
-    if (crypto_init() != 0) { fprintf(stderr, "Crypto init failed\n"); exit(1); }
-
     discovery_init();
 
     /* ── Backward-compat fast path ─────────────────────────────────
@@ -397,7 +394,7 @@ void backend_send_message(char to, const char *msg) {
 
     int attempts = 0;
     while (attempts < 3) {
-        encrypted_sendto(sock_fd, packet, strlen(packet), (struct sockaddr *)&dest, sizeof(dest));
+        sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest));
         
         for (int i = 0; i < 50; i++) {
             if (ack_received == 1) break;
@@ -443,7 +440,7 @@ void backend_broadcast(const char *msg) {
         dest.sin_family      = AF_INET;
         dest.sin_port        = htons(snapshot[i].port);
         if (inet_pton(AF_INET, snapshot[i].ip, &dest.sin_addr) <= 0) continue;
-        if (encrypted_sendto(sock_fd, packet, strlen(packet), (struct sockaddr *)&dest, sizeof(dest)) > 0)
+        if (sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest)) > 0)
             sent_count++;  /* Issue #3 fix: count each successful send, not just +1 for the whole broadcast */
     }
 
@@ -478,7 +475,7 @@ int backend_receive(char *out, int max_len) {
     }
 
     /* Chat socket has data */
-    int bytes = encrypted_recvfrom(sock_fd, buf, read_limit, NULL, NULL);
+    int bytes = recvfrom(sock_fd, buf, read_limit, 0, NULL, NULL);
     if (bytes < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
         return -1;
@@ -561,7 +558,7 @@ int backend_receive(char *out, int max_len) {
                 dest.sin_family = AF_INET;
                 dest.sin_port = htons(nodes[idx].port);
                 inet_pton(AF_INET, nodes[idx].ip, &dest.sin_addr);
-                encrypted_sendto(sock_fd, ack_pkt, strlen(ack_pkt), (struct sockaddr *)&dest, sizeof(dest));
+                sendto(sock_fd, ack_pkt, strlen(ack_pkt), 0, (struct sockaddr *)&dest, sizeof(dest));
             }
             pthread_mutex_unlock(&nodes_mutex);
             
@@ -606,7 +603,7 @@ void backend_leave(void) {
         dest.sin_family      = AF_INET;
         dest.sin_port        = htons(nodes[i].port);
         if (inet_pton(AF_INET, nodes[i].ip, &dest.sin_addr) <= 0) continue;
-        encrypted_sendto(sock_fd, packet, strlen(packet), (struct sockaddr *)&dest, sizeof(dest));
+        sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest));
     }
     pthread_mutex_unlock(&nodes_mutex);
 }

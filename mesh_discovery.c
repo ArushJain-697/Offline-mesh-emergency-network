@@ -1,4 +1,5 @@
 #include "mesh_discovery.h"
+#include "mesh_crypto.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,8 +88,12 @@ static char *send_discover_and_wait(const char *target_ip, int my_port,
     dest.sin_port        = htons(DISCOVERY_PORT);
     inet_pton(AF_INET, target_ip, &dest.sin_addr);
 
-    sendto(bfd, packet, strlen(packet), 0,
-           (struct sockaddr *)&dest, sizeof(dest));
+    /* Encrypt before sending so only keyholders can parse our knock */
+    uint8_t enc[256];
+    int enc_len = crypto_encrypt_packet((const uint8_t *)packet, strlen(packet),
+                                         enc, sizeof(enc));
+    if (enc_len > 0)
+        sendto(bfd, enc, enc_len, 0, (struct sockaddr *)&dest, sizeof(dest));
     close(bfd);
 
     /* Listen on the personal chat socket for NET_WELCOME */
@@ -100,14 +105,19 @@ static char *send_discover_and_wait(const char *target_ip, int my_port,
     if (select(sock_fd + 1, &rfds, NULL, NULL, &tv) <= 0)
         return NULL;
 
+    /* Decrypt the incoming NET_WELCOME */
+    uint8_t raw[2048];
+    int raw_n = recv(sock_fd, raw, sizeof(raw), 0);
+    if (raw_n <= 0) return NULL;
+
     char *buf = malloc(2048);
     if (!buf) return NULL;
-    int n = recv(sock_fd, buf, 2047, 0);
-    if (n <= 0 || strncmp(buf, "NET_WELCOME:", 12) != 0) {
+    int plain_n = crypto_decrypt_packet(raw, raw_n, (uint8_t *)buf, 2047);
+    if (plain_n <= 0 || strncmp(buf, "NET_WELCOME:", 12) != 0) {
         free(buf);
         return NULL;
     }
-    buf[n] = '\0';
+    buf[plain_n] = '\0';
     return buf;
 }
 
@@ -145,12 +155,17 @@ char *discovery_bootstrap(int sock_fd, int my_port,
 /* ── Public: handle an incoming NET_DISCOVER on disc_fd ────────── */
 
 void discovery_handle_incoming(on_new_peer_fn on_new_peer) {
-    char buf[128];
+    uint8_t raw[256];
     struct sockaddr_in sender = {0};
     socklen_t slen = sizeof(sender);
 
-    int n = recvfrom(disc_fd, buf, sizeof(buf) - 1, 0,
-                     (struct sockaddr *)&sender, &slen);
+    int raw_n = recvfrom(disc_fd, raw, sizeof(raw), 0,
+                         (struct sockaddr *)&sender, &slen);
+    if (raw_n <= 0) return;
+
+    /* Decrypt — silently ignore packets from nodes without the key */
+    char buf[128];
+    int n = crypto_decrypt_packet(raw, raw_n, (uint8_t *)buf, sizeof(buf) - 1);
     if (n <= 0) return;
     buf[n] = '\0';
 

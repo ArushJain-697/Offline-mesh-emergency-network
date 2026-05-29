@@ -4,7 +4,7 @@ nodes_*.dat
 
 # Chat history logs
 chat_history_*.txt
-
+mesh.key
 # Compiled binaries
 mesh_cli
 add_node

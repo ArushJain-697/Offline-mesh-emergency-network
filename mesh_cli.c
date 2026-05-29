@@ -79,6 +79,7 @@ int main(int argc, char **argv) {
         continue;
       backend_broadcast(msg);
     } else if (op == 3) {
+      backend_leave();
       running = 0;
       break;
     } else {

@@ -277,6 +277,27 @@ int backend_receive(char *out, int max_len) {
         printf("Choose: "); fflush(stdout);
         return 0;
     }
+    if (strncmp(buf, "NET_LEAVE:", 10) == 0) {
+        char left_node = buf[10];
+        pthread_mutex_lock(&nodes_mutex);
+        int idx = find_node_index(left_node);
+        if (idx >= 0) {
+            for (int i = idx; i < node_count - 1; i++) {
+                nodes[i] = nodes[i + 1];
+            }
+            node_count--;
+            save_nodes_file();
+        }
+        pthread_mutex_unlock(&nodes_mutex);
+        printf("\n>>> Node %c left the network\n", left_node);
+        printf("Choose: "); fflush(stdout);
+        char time_str[16]; get_time_str(time_str, sizeof(time_str));
+        char log_entry[512];
+        snprintf(log_entry, sizeof(log_entry),
+                 "[%s] [SYSTEM] node %c left the network", time_str, left_node);
+        write_history(log_entry);
+        return 0;
+    }
 
     char time_str[16];
     get_time_str(time_str, sizeof(time_str));
@@ -289,6 +310,23 @@ int backend_receive(char *out, int max_len) {
     write_history(out);
     recv_count++;
     return bytes;
+}
+void backend_leave(void) {
+    char packet[64];
+    snprintf(packet, sizeof(packet), "NET_LEAVE:%c", node_name);
+    pthread_mutex_lock(&nodes_mutex);
+    for (int i = 0; i < node_count; i++) {
+        if (nodes[i].name == node_name) continue;
+        in_addr_t addr = inet_addr(nodes[i].ip);
+        if (addr == INADDR_NONE) continue;
+        struct sockaddr_in dest;
+        memset(&dest, 0, sizeof(dest));
+        dest.sin_family      = AF_INET;
+        dest.sin_port        = htons(nodes[i].port);
+        dest.sin_addr.s_addr = addr;
+        sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest));
+    }
+    pthread_mutex_unlock(&nodes_mutex);
 }
 
 void backend_close(void) {

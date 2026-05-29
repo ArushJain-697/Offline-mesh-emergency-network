@@ -20,6 +20,7 @@
 static int sock_fd = -1;
 static char node_name = 'A';
 static char history_file[64];
+static int my_port_global = 0;  /* our own chat port, set at bind time */
 static struct sockaddr_in my_addr;
 static int sent_count = 0;
 static int recv_count = 0;
@@ -191,6 +192,13 @@ static char next_available_letter(void) {
 }
 
 static void on_new_peer_discovered(const char *ip, int port) {
+    /* Guard: ignore our own broadcast echoed back to us.
+       This happens on macOS where 255.255.255.255 broadcasts loop back
+       to the sender's own socket buffer before the receiver thread drains it. */
+    if (port == my_port_global) {
+        printf("[DISCOVERY] Ignoring self-broadcast echo (port %d)\n", port);
+        return;
+    }
     pthread_mutex_lock(&nodes_mutex);
     char letter = next_available_letter();
     if (letter == '\0') {
@@ -245,6 +253,7 @@ void backend_bootstrap(int port, const char *helper_ip, int helper_port) {
     if (bind(sock_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind"); exit(1);
     }
+    my_port_global = port;  /* set before any broadcast so self-echo guard works */
     struct timeval tv = {1, 0};
     setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 

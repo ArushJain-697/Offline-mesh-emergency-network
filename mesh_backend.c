@@ -223,8 +223,13 @@ void backend_broadcast(const char *msg) {
 }
 
 int backend_receive(char *out, int max_len) {
+    /* Bug fix #3: "From X at HH:MM:SS: " prefix is ~22 chars.
+       Limit what we read so the assembled string always fits in out[max_len]. */
+    #define MSG_PREFIX_OVERHEAD 25
     char buf[1024];
-    int bytes = recvfrom(sock_fd, buf, 1023, 0, NULL, NULL);
+    int read_limit = max_len - MSG_PREFIX_OVERHEAD - 1;
+    if (read_limit <= 0 || read_limit > 1023) read_limit = 1023;
+    int bytes = recvfrom(sock_fd, buf, read_limit, 0, NULL, NULL);
     if (bytes < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
         return -1;

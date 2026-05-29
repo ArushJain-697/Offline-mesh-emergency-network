@@ -1,6 +1,7 @@
 #include "mesh_backend.h"
 #include <ctype.h>
 #include <pthread.h>
+#include <stdatomic.h>   /* required for _Atomic (C11) */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -118,17 +118,15 @@ static void send_welcome(char to_name) {
         printf("WARNING: NET_WELCOME payload truncated — node %c will have incomplete map.\n", to_name);
     if (offset > 12 && payload[offset - 1] == ',') payload[offset - 1] = '\0';
 
-    in_addr_t addr = inet_addr(nodes[idx].ip);
-    if (addr == INADDR_NONE) {
-        printf("ERROR: bad IP for node %c\n", to_name);
-        pthread_mutex_unlock(&nodes_mutex);
-        return;
-    }
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
     dest.sin_family      = AF_INET;
     dest.sin_port        = htons(nodes[idx].port);
-    dest.sin_addr.s_addr = addr;
+    if (inet_pton(AF_INET, nodes[idx].ip, &dest.sin_addr) <= 0) {
+        printf("ERROR: bad IP for node %c\n", to_name);
+        pthread_mutex_unlock(&nodes_mutex);
+        return;
+    }
     pthread_mutex_unlock(&nodes_mutex);
 
     sendto(sock_fd, payload, strlen(payload), 0,
@@ -176,17 +174,15 @@ void backend_send_message(char to, const char *msg) {
     int idx = find_node_index(to);
     if (idx < 0) { pthread_mutex_unlock(&nodes_mutex); printf("Unknown node %c\n", to); return; }
 
-    in_addr_t addr = inet_addr(nodes[idx].ip);
-    if (addr == INADDR_NONE) {
-        printf("ERROR: bad IP for node %c\n", to);
-        pthread_mutex_unlock(&nodes_mutex);
-        return;
-    }
     struct sockaddr_in dest;
     memset(&dest, 0, sizeof(dest));
     dest.sin_family      = AF_INET;
     dest.sin_port        = htons(nodes[idx].port);
-    dest.sin_addr.s_addr = addr;
+    if (inet_pton(AF_INET, nodes[idx].ip, &dest.sin_addr) <= 0) {
+        printf("ERROR: bad IP for node %c\n", to);
+        pthread_mutex_unlock(&nodes_mutex);
+        return;
+    }
     pthread_mutex_unlock(&nodes_mutex);
 
     char packet[1100];
@@ -213,13 +209,11 @@ void backend_broadcast(const char *msg) {
 
     for (int i = 0; i < snap_count; i++) {
         if (snapshot[i].name == node_name) continue;
-        in_addr_t addr = inet_addr(snapshot[i].ip);
-        if (addr == INADDR_NONE) continue;
         struct sockaddr_in dest;
         memset(&dest, 0, sizeof(dest));
         dest.sin_family      = AF_INET;
         dest.sin_port        = htons(snapshot[i].port);
-        dest.sin_addr.s_addr = addr;
+        if (inet_pton(AF_INET, snapshot[i].ip, &dest.sin_addr) <= 0) continue;
         if (sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest)) > 0)
             sent_count++;  /* Issue #3 fix: count each successful send, not just +1 for the whole broadcast */
     }
@@ -317,13 +311,11 @@ void backend_leave(void) {
     pthread_mutex_lock(&nodes_mutex);
     for (int i = 0; i < node_count; i++) {
         if (nodes[i].name == node_name) continue;
-        in_addr_t addr = inet_addr(nodes[i].ip);
-        if (addr == INADDR_NONE) continue;
         struct sockaddr_in dest;
         memset(&dest, 0, sizeof(dest));
         dest.sin_family      = AF_INET;
         dest.sin_port        = htons(nodes[i].port);
-        dest.sin_addr.s_addr = addr;
+        if (inet_pton(AF_INET, nodes[i].ip, &dest.sin_addr) <= 0) continue;
         sendto(sock_fd, packet, strlen(packet), 0, (struct sockaddr *)&dest, sizeof(dest));
     }
     pthread_mutex_unlock(&nodes_mutex);

@@ -151,18 +151,15 @@ int main(int argc, char **argv)
         if (nodes[i].name == helper || nodes[i].name == newn)
             continue;
 
-        in_addr_t addr = inet_addr(nodes[i].ip);
-        if (addr == INADDR_NONE)
-        {
-            fprintf(stderr, "Bad IP for node %c: %s, skipping\n", nodes[i].name, nodes[i].ip);
-            continue;
-        }
-
         struct sockaddr_in dest;
         memset(&dest, 0, sizeof(dest));
         dest.sin_family = AF_INET;
         dest.sin_port = htons(nodes[i].port);
-        dest.sin_addr.s_addr = addr;
+        if (inet_pton(AF_INET, nodes[i].ip, &dest.sin_addr) <= 0)
+        {
+            fprintf(stderr, "Bad IP for node %c: %s, skipping\n", nodes[i].name, nodes[i].ip);
+            continue;
+        }
 
         ssize_t s = sendto(sock, payload, strlen(payload), 0,
                            (struct sockaddr *)&dest, sizeof(dest));

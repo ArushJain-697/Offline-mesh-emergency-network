@@ -51,9 +51,10 @@ This project implements a basic mesh network using UDP sockets in C. It allows n
 1.  **Configure the nodes:**
     Use the `add_node` utility to add or update node information in the `nodes.dat` file.  For example:
     ```bash
-    ./add_node -h A -n B -i 127.0.0.1 -p 5001
+    ./add_node A B 127.0.0.1 5001
     ```
     This command adds a node with the name 'B', IP address '127.0.0.1', and port '5001', using node 'A' as a helper.
+    The four positional arguments are: `<HelperNodeLetter> <NewNodeLetter> <NewNodeIP> <NewNodePort>`.
 
     Option B (Interactive Wizard): You can also use the easier interactive mode provided in the Makefile:
     ```bash

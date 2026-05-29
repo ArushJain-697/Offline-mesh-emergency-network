@@ -250,7 +250,34 @@ void backend_bootstrap(int port, const char *helper_ip, int helper_port) {
     /* Step 2: Open discovery socket (port 9000) */
     discovery_init();
 
-    /* Step 3: Try to find existing network */
+    /* ── Backward-compat fast path ─────────────────────────────────
+       If nodes.dat exists AND already contains an entry for our port,
+       we are a known node (e.g. a Docker container with baked-in dat).
+       Skip all discovery, load the file, and start immediately.     */
+    pthread_mutex_lock(&nodes_mutex);
+    load_nodes_file();
+    int found_self = 0;
+    for (int i = 0; i < node_count; i++) {
+        if (nodes[i].port == port) {
+            node_name = nodes[i].name;
+            found_self = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&nodes_mutex);
+
+    if (found_self) {
+        snprintf(history_file, sizeof(history_file),
+                 "chat_history_%c.txt", node_name);
+        my_addr = addr;
+        printf("[BOOTSTRAP] Found self in nodes.dat as Node %c on port %d"
+               " — skipping discovery.\n", node_name, port);
+        printf("Chat history will be saved to: %s\n", history_file);
+        return;
+    }
+
+    /* No existing nodes.dat entry — run discovery */
+    node_count = 0; /* reset stale data from partial load */
     printf("[BOOTSTRAP] Searching for existing network on port %d...\n", port);
     char *welcome = discovery_bootstrap(sock_fd, port, helper_ip, helper_port);
 

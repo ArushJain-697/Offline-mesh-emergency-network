@@ -1,42 +1,19 @@
 services:
-  node_a:
+  mesh_node:
     build: .
-    container_name: mesh_node_a
-    hostname: node_a
     stdin_open: true
     tty: true
-    command: ["./mesh_cli", "A"]
+    environment:
+      - MESH_PORT=${MESH_PORT:-9001}
+    # Node reads its port from the env var and runs auto-discovery.
+    # For cross-machine bootstrap, override the command:
+    #   docker run ... mesh_cli 9002 192.168.1.10 9001
+    command: ["sh", "-c", "./mesh_cli $MESH_PORT"]
     ports:
-      - "9001:9001/udp"   # exposes node A's UDP port to the host
+      - "${MESH_PORT:-9001}:${MESH_PORT:-9001}/udp"
+      - "9000:9000/udp"   # shared discovery port
     networks:
       mesh_net:
-        ipv4_address: 10.10.0.2
-
-  node_b:
-    build: .
-    container_name: mesh_node_b
-    hostname: node_b
-    stdin_open: true
-    tty: true
-    command: ["./mesh_cli", "B"]
-    ports:
-      - "9002:9002/udp"   # exposes node B's UDP port to the host
-    networks:
-      mesh_net:
-        ipv4_address: 10.10.0.3
-
-  node_c:
-    build: .
-    container_name: mesh_node_c
-    hostname: node_c
-    stdin_open: true
-    tty: true
-    command: ["./mesh_cli", "C"]
-    ports:
-      - "9003:9003/udp"   # exposes node C's UDP port to the host
-    networks:
-      mesh_net:
-        ipv4_address: 10.10.0.4
 
 networks:
   mesh_net:

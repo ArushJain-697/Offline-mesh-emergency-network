@@ -1,104 +1,211 @@
-#  Offline Mesh Emergency Network
+## Offline Mesh Emergency Network (OMEN)
 
-This project implements a basic mesh network using UDP sockets in C. It allows nodes to discover each other, send messages to specific nodes, and broadcast messages to the entire network. The core functionality includes node management, network communication, message handling, and history logging. A command-line interface (CLI) is provided for user interaction, and a separate utility is included for configuring the network by adding or updating node information.
+>A decentralized, peer-to-peer UDP mesh network written in C. Devices on a shared subnet form an encrypted communication network with zero external infrastructure, no internet, no central server, no single point of failure.
+>
+>Built for scenarios where conventional infrastructure fails: natural disasters, grid blackouts, remote field operations.
 
-##  Key Features
+---
 
-*   **Node Discovery:** Nodes can discover each other and maintain a list of known nodes in the network.
-*   **Message Sending:** Users can send messages to specific nodes by specifying the destination node's identifier.
-*   **Broadcast Messaging:** Users can broadcast messages to all known nodes in the network.
-*   **Message Receiving:** Nodes continuously listen for incoming messages and display them to the user.
-*   **History Logging:** Sent and received messages are logged to a history file for each node.
-*   **Node Configuration:** A utility program (`add_node.c`) allows for easy addition or modification of node information in the network configuration file (`nodes.dat`).
-*   **Command-Line Interface:** User-friendly CLI for interacting with the mesh network.
-*   **Multi-threading:** Utilizes a separate thread for receiving messages, allowing for concurrent operation.
+## Architecture
 
-##  Tech Stack
+OMEN is a **single-subnet, flat mesh**. Every node communicates directly with every other node via UDP. There is no routing layer ,  all nodes must be reachable on the same subnet (same Wi-Fi, hotspot, or Docker bridge).
 
-*   **Language:** C
-*   **Networking:** UDP Sockets (using `arpa/inet.h`, `sys/socket.h`, `netinet/in.h`)
-*   **Threading:** POSIX Threads (`pthread.h`)
-*   **Data Storage:** Flat file (`nodes.dat`) for storing node information
-*   **Build Tools:** Make (assumed, based on typical C projects)
-*   **Standard C Libraries:** `stdio.h`, `stdlib.h`, `string.h`, `unistd.h`, `ctype.h`, `time.h`, `errno.h`
+Nodes are assigned letters A–Z. The first node to boot becomes Node A (the Genesis Node). Every subsequent node that joins is auto-assigned the next available letter via the bootstrap handshake.
 
-##  Getting Started / Setup Instructions
+---
 
-### Prerequisites
+## Features
 
-*   A C compiler (e.g., GCC)
-*   POSIX threads library (`pthread`)
-*   Make (optional, but recommended for building)
+| Feature | Description |
+|---|---|
+| Auto-discovery | 3-layer bootstrap: Docker subnet broadcast → LAN broadcast → targeted IP fallback |
+| Reliable messaging | Application-layer RDT 3.0: stop-and-wait ARQ, alternating 0/1 sequence numbers, 1s timeout, 3 retransmits |
+| Broadcast | Fire-and-forget UDP to all known nodes simultaneously |
+| Heartbeat + purge | Background thread pings all peers every 5s; nodes silent for >15s are removed from the registry |
+| Authenticated encryption | libsodium `crypto_secretbox` (XSalsa20-Poly1305); key derived in-memory via BLAKE2b hash of shared password |
+| Dynamic topology | `NET_ADD` / `NET_WELCOME` / `NET_LEAVE` protocol keeps all nodes in sync as peers join or exit |
+| Chat history | All sent and received messages appended to `chat_history_<Node>.txt` with timestamps |
 
-### Installation
+---
 
-1.  **Clone the repository:**
-    ```bash
-    git clone <repository_url>
-    cd <repository_directory>
-    ```
+## How Bootstrap Works
 
-2.  **Compile the code:**
-    ```bash
-    make
-    ```
+Every node ,  including the first ,  runs the full bootstrap sequence on startup. There are no shortcuts based on a cached `nodes.dat`.
 
-3.  **Create the `nodes.dat` file (if it doesn't exist):**
-    The `nodes.dat` file stores information about the nodes in the network. You can create it manually or use the `add_node` utility to add the first node.
+1. Sends `NET_DISCOVER:<port>` (encrypted) to all three targets in order
+2. Waits up to 1–2 seconds per layer for a `NET_WELCOME` response
+3. **If a response arrives:** parses the full node list from `NET_WELCOME`, registers all peers, and joins as the assigned letter
+4. **If no response:** declares itself Genesis Node A and begins listening
 
-### Running Locally
+`NET_WELCOME` is the single source of truth for topology. A node never assumes its local `nodes.dat` is current.
 
-1.  **Configure the nodes:**
-    Use the `add_node` utility to add or update node information in the `nodes.dat` file.  For example:
-    ```bash
-    ./add_node A 127.0.0.1 5001
-    ```
-    Arguments: `<HelperNodeLetter> <NewNodeIP> <NewNodePort>`
-    The new node's letter is **auto-assigned** (next free A–Z) — no two nodes can ever get the same letter.
-    The output will tell you the assigned letter, e.g.:
-    ```
-    Auto-assigned letter 'D' to new node at 127.0.0.1:5001
-    Tell the new participant: run  ./mesh_cli D
-    ```
+---
 
-    Option B (Interactive Wizard): You can also use the easier interactive mode provided in the Makefile:
-    ```bash
-    make add
-    ```
-    Run the mesh network application: Use the Makefile shortcut to run the chat program:
-    ```bash
-    make chat
-    ```
+## Cryptography
 
-3.  **Run the mesh network application:**
-    Pass the letter assigned by `add_node` as the first argument:
-    ```bash
-    ./mesh_cli D
-    ```
-    Or use the Makefile shortcut:
-    ```bash
-    make chat_node NODE=D
-    ```
+Every UDP packet ,  including discovery knocks ,  is encrypted before it leaves the socket.
 
-4.  **Interact with the CLI:**
-    The CLI will prompt you to enter a node letter and then present a menu of options: send message, broadcast, or exit.
-
-## 💻 Usage
-
-1.  **Start multiple instances of the `mesh_cli` application** on different terminals, each representing a node in the mesh network.
-2.  **Configure each node** with a unique name, IP address, and port using the `add_node` utility. Ensure that the `nodes.dat` file is correctly populated with the information for all nodes in the network.
-3.  **Use the CLI** to send messages to specific nodes or broadcast messages to the entire network.
-4.  **Observe the messages** being received and displayed on the other nodes' terminals.
-
-## 📂 Project Structure
-
-```
-├── add_node.c          # Utility to add/update node information in nodes.dat
-├── mesh_backend.c      # Core backend logic for the mesh network
-├── mesh_backend.h      # Header file for the mesh network backend
-├── mesh_cli.c          # Command-line interface for interacting with the mesh network
-├── nodes.dat           # (Optional) File storing node information
-└── Makefile            # (Optional) Build file
+```mermaid
+flowchart TD
+    A["password (string)"]
+    A --> B["crypto_generichash (BLAKE2b) ──> 32-byte symmetric key (in-memory only)"]
+    B --> C["24-byte random nonce (prepended to packet)"]
+    B --> D["crypto_secretbox_easy (XSalsa20 + Poly1305 MAC)"]
 ```
 
+- No key files are written to disk
+- Nodes without the correct password cannot decrypt or parse any packet, including `NET_DISCOVER`
+- The 16-byte MAC causes any tampered or replayed packet to be silently dropped
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Language | C (C11) |
+| Networking | UDP sockets (SOCK_DGRAM) |
+| Concurrency | POSIX threads (pthread) |
+| Cryptography | libsodium (crypto_secretbox, crypto_generichash) |
+| Containerization | Docker + Docker Compose |
+| Build | GNU Make |
+
+---
+
+## Build
+
+**Linux / macOS:**
+```bash
+sudo apt install gcc make libsodium-dev   # Debian/Ubuntu
+brew install libsodium                    # macOS
+```
+
+```bash
+git clone https://github.com/ArushJain-697/omen
+cd omen
+make build
+```
+
+**Windows:** WSL2 is required. OMEN uses POSIX threads and raw UDP sockets.
+
+```powershell
+# PowerShell (Admin)
+wsl --install
+```
+
+```bash
+# Inside WSL Ubuntu
+sudo apt update && sudo apt install gcc make libsodium-dev
+```
+
+---
+
+## Running
+
+### Same machine (two terminals)
+
+```bash
+# Terminal 1
+./mesh_cli 9001 mysecretpassword
+
+# Terminal 2
+./mesh_cli 9002 mysecretpassword
+```
+
+### Two machines on the same network or hotspot
+
+LAN broadcast (Layer 2) handles discovery automatically if both machines are on the same subnet. If it fails, use the targeted fallback:
+
+```bash
+# Machine 1
+./mesh_cli 9001 mysecretpassword
+
+# Machine 2 ,  provide Machine 1's IP explicitly
+./mesh_cli 9002 mysecretpassword 192.168.x.x 9001
+```
+
+**Mobile hotspot setup:** Enable hotspot on a phone, connect both machines to it, then run the commands above. Find your subnet IP with:
+```bash
+ip route get 8.8.8.8 | awk '{print $7; exit}'
+```
+
+**WSL2 cross-machine note:** WSL2 uses a virtualized network namespace. Find the WSL2 interface IP with `ip addr show eth0 | grep inet` and pass it as the helper address.
+
+### Docker (multi-node on one machine)
+
+```bash
+docker build -t omen .
+
+# Node 1
+docker run -it --rm --network omen_mesh_net -p 9001:9001/udp -p 9000:9000/udp omen ./mesh_cli 9001 mysecretpassword
+
+# Node 2
+docker run -it --rm --network omen_mesh_net -p 9002:9002/udp omen ./mesh_cli 9002 mysecretpassword
+```
+
+Docker subnet broadcast (`10.10.0.255`) is tried first ,  no extra configuration needed.
+
+---
+
+## CLI Usage
+
+```
+1) Send message
+2) Broadcast
+3) Exit
+Choose:
+```
+
+Incoming messages print inline without blocking the prompt:
+
+```
+[RECEIVED] From B at 14:32:07: Sector 4 clear, moving to extraction
+Choose: _
+```
+
+System events:
+```
+>>> Node C joined via discovery (192.168.1.42:9003)
+[SYSTEM] Node D timed out (Ghost Node removed).
+>>> Node B left the network
+```
+
+---
+
+## Project Structure
+
+```
+mesh_cli.c          CLI entry point, receiver thread, menu loop
+mesh_backend.c      Node registry, send/recv, heartbeat, ARQ logic
+mesh_backend.h      Public API
+mesh_discovery.c    3-layer peer discovery, NET_DISCOVER handler
+mesh_discovery.h    Discovery API, on_new_peer_fn callback
+mesh_crypto.c       libsodium encrypt/decrypt wrappers
+mesh_crypto.h       Crypto API
+Makefile
+Dockerfile
+docker-compose.yml
+```
+
+---
+
+## Known Limitations
+
+| Limitation | Detail |
+|---|---|
+| Single subnet only | All nodes must share a subnet. No internet-routed or multi-hop operation. |
+| Max 26 nodes | Named A–Z. |
+| Stop-and-wait throughput | One in-flight message per sender at a time. |
+| No fragmentation | Messages above ~1984 bytes are truncated (2048 buffer minus 40-byte crypto overhead and protocol header). |
+| nodes.dat consistency | File writes are mutex-protected in memory but not atomic on disk. |
+
+---
+
+## Roadmap
+
+- Dijkstra-based multi-hop routing to relay messages through intermediate nodes
+- Store-and-forward for nodes that join after a message was sent
+- Raspberry Pi / Android builds
+
+---
 

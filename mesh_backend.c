@@ -45,8 +45,7 @@ static int encrypted_recvfrom(int fd, char *buf, int buf_len,
 static int sock_fd = -1;
 static char node_name = 'A';
 static char history_file[64];
-static int my_port_global = 0;  
-static struct sockaddr_in my_addr;
+static int my_port_global = 0;
 static int sent_count = 0;
 static int recv_count = 0;
 
@@ -78,27 +77,6 @@ static void get_time_str(char *buf, size_t size) {
 static void write_history(const char *entry) {
     FILE *fp = fopen(history_file, "a");
     if (fp) { fprintf(fp, "%s\n", entry); fclose(fp); }
-}
-
-static void load_nodes_file(void) {
-    FILE *fp = fopen(NODES_DATA_FILE, "r");
-    if (!fp) { return; }
-    node_count = 0;
-    char line[256];
-    time_t now = time(NULL);
-    while (fgets(line, sizeof(line), fp) != NULL) {
-        char n, ip[MAX_IP_LEN];
-        int port;
-        if (sscanf(line, " %c %63s %d", &n, ip, &port) == 3) {
-            nodes[node_count].name = n;
-            strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
-            nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
-            nodes[node_count].port = port;
-            nodes[node_count].last_seen = now; /* Assume fresh on load */
-            node_count++;
-        }
-    }
-    fclose(fp);
 }
 
 static void save_nodes_file(void) {
@@ -227,42 +205,6 @@ static void start_heartbeat_thread(void) {
     pthread_detach(hb_tid);
 }
 
-void backend_init(char name) {
-    node_name = name;
-    snprintf(history_file, sizeof(history_file), "chat_history_%c.txt", name);
-
-    pthread_mutex_lock(&nodes_mutex);
-    load_nodes_file();
-    pthread_mutex_unlock(&nodes_mutex);
-
-    sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock_fd < 0) { perror("socket"); exit(1); }
-
-    memset(&my_addr, 0, sizeof(my_addr));
-    my_addr.sin_family = AF_INET;
-
-    pthread_mutex_lock(&nodes_mutex);
-    int my_port = -1;
-    for (int i = 0; i < node_count; i++)
-        if (nodes[i].name == node_name) my_port = nodes[i].port;
-    pthread_mutex_unlock(&nodes_mutex);
-
-    if (my_port == -1) { printf("ERROR: Node %c not in nodes.dat\n", node_name); exit(1); }
-
-    my_addr.sin_port        = htons(my_port);
-    my_addr.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(sock_fd, (struct sockaddr *)&my_addr, sizeof(my_addr)) < 0) {
-        perror("bind"); exit(1);
-    }
-
-    struct timeval tv = {.tv_sec = 1, .tv_usec = 0};
-    setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    printf("Backend started for %c on port %d\n", node_name, my_port);
-    start_heartbeat_thread();
-}
-
 static char next_available_letter(void) {
     for (char c = 'A'; c <= 'Z'; c++) {
         if (find_node_index(c) < 0) return c;
@@ -389,7 +331,6 @@ void backend_bootstrap(int port, const char *password, const char *helper_ip, in
     }
 
     snprintf(history_file, sizeof(history_file), "chat_history_%c.txt", node_name);
-    my_addr = addr;
     start_heartbeat_thread();
 }
 

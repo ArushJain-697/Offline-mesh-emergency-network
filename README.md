@@ -55,7 +55,7 @@ flowchart TD
 
 - No key files are written to disk
 - Nodes without the correct password cannot decrypt or parse any packet, including `NET_DISCOVER`
-- The 16-byte MAC causes any tampered or replayed packet to be silently dropped
+- The 16-byte MAC causes any tampered packet to be silently dropped (there is no replay protection yet — a captured ciphertext can be re-sent and will decrypt)
 
 ---
 

@@ -305,12 +305,13 @@ static void flood_packet(const char *payload, uint8_t ttl, const uint8_t *id,
     }
 }
 
-/* Topology + per-link heartbeat stay 1-hop; DIR/ACK/broadcast get relayed. */
+/* Per-link heartbeat and the targeted NET_WELCOME dump stay 1-hop; everything
+ * else — DIR/ACK/broadcast AND topology (NET_ADD/NET_LEAVE) — floods mesh-wide
+ * so distant nodes converge on the full peer list. Handlers are idempotent and
+ * dedup bounds the flood. */
 static int is_relayable(const char *buf) {
     if (strncmp(buf, "HRT:", 4) == 0)          return 0;
-    if (strncmp(buf, "NET_ADD:", 8) == 0)      return 0;
     if (strncmp(buf, "NET_WELCOME:", 12) == 0) return 0;
-    if (strncmp(buf, "NET_LEAVE:", 10) == 0)   return 0;
     return 1;
 }
 
@@ -560,24 +561,11 @@ static void on_new_peer_discovered(const char *ip, int port) {
     save_nodes_file();
     pthread_mutex_unlock(&nodes_mutex);
 
+    /* Announce the new node mesh-wide (flooded + relayed) so peers many hops
+     * away learn it and can address it — not just the welcomer's neighbours. */
     char add_pkt[128];
     snprintf(add_pkt, sizeof(add_pkt), "NET_ADD:%c:%s:%d", letter, ip, port);
-    
-    struct NodeInfo snapshot[MAX_NODES];
-    int snap_count;
-    pthread_mutex_lock(&nodes_mutex);
-    snap_count = node_count;
-    memcpy(snapshot, nodes, sizeof(struct NodeInfo) * node_count);
-    pthread_mutex_unlock(&nodes_mutex);
-    
-    for (int i = 0; i < snap_count; i++) {
-        if (snapshot[i].name == letter || snapshot[i].name == node_name) continue;
-        struct sockaddr_in d = {0};
-        d.sin_family = AF_INET;
-        d.sin_port   = htons(snapshot[i].port);
-        if (inet_pton(AF_INET, snapshot[i].ip, &d.sin_addr) > 0)
-            encrypted_sendto(sock_fd, add_pkt, strlen(add_pkt), (struct sockaddr *)&d, sizeof(d));
-    }
+    flood_packet(add_pkt, MESH_DEFAULT_TTL, NULL, NULL, 0);
 
     send_welcome(letter);
     printf("\r\033[K>>> Node %c joined via discovery (%s:%d)\nChoose: ", letter, ip, port);
@@ -838,19 +826,10 @@ int backend_receive(char *out, int max_len) {
 }
 
 void backend_leave(void) {
+    /* Flood the departure mesh-wide so every node prunes us, not just neighbours. */
     char packet[64];
     snprintf(packet, sizeof(packet), "NET_LEAVE:%c", node_name);
-    pthread_mutex_lock(&nodes_mutex);
-    for (int i = 0; i < node_count; i++) {
-        if (nodes[i].name == node_name) continue;
-        struct sockaddr_in dest;
-        memset(&dest, 0, sizeof(dest));
-        dest.sin_family      = AF_INET;
-        dest.sin_port        = htons(nodes[i].port);
-        if (inet_pton(AF_INET, nodes[i].ip, &dest.sin_addr) <= 0) continue;
-        encrypted_sendto(sock_fd, packet, strlen(packet), (struct sockaddr *)&dest, sizeof(dest));
-    }
-    pthread_mutex_unlock(&nodes_mutex);
+    flood_packet(packet, MESH_DEFAULT_TTL, NULL, NULL, 0);
 }
 
 void backend_close(void) {

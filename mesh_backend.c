@@ -272,8 +272,20 @@ static char next_available_letter(void) {
 
 static void on_new_peer_discovered(const char *ip, int port) {
     if (port == my_port_global) return;
-    
+
     pthread_mutex_lock(&nodes_mutex);
+    /* Already known (re-knock, broadcast seen twice, or reconnect)? Just
+       refresh liveness and re-welcome — never allocate a second letter. */
+    for (int i = 0; i < node_count; i++) {
+        if (strcmp(nodes[i].ip, ip) == 0 && nodes[i].port == port) {
+            char known = nodes[i].name;
+            nodes[i].last_seen = time(NULL);
+            pthread_mutex_unlock(&nodes_mutex);
+            send_welcome(known);
+            return;
+        }
+    }
+
     char letter = next_available_letter();
     if (letter == '\0') {
         pthread_mutex_unlock(&nodes_mutex);

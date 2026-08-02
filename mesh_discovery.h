@@ -26,12 +26,14 @@ void discovery_get_my_ip(char *out, size_t len);
    Returns a malloc'd NET_WELCOME string on success (caller frees).
    Returns NULL → nobody answered, caller should become genesis node. */
 char *discovery_bootstrap(int sock_fd, int my_port,
-                           const char *helper_ip, int helper_port);
+                           const char *helper_ip, int helper_port,
+                           const char *my_id_hex, char my_letter);
 
 /* Called by the receiver thread when select() reports data on disc_fd.
    Reads the NET_DISCOVER packet and calls on_new_peer(ip, port) so
    mesh_backend can assign a letter and send NET_WELCOME. */
-typedef void (*on_new_peer_fn)(const char *ip, int port);
+typedef void (*on_new_peer_fn)(const char *ip, int port,
+                               const char *id_hex, char want_letter);
 void discovery_handle_incoming(on_new_peer_fn on_new_peer);
 
 #endif /* MESH_DISCOVERY_H */

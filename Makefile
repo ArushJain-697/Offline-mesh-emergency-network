@@ -30,7 +30,7 @@ test: test_frame.c mesh_frame.c
 	@./test_frame
 
 clean:
-	rm -f $(CHAT_BIN) test_frame *.o chat_history_*.txt nodes.dat
+	rm -f $(CHAT_BIN) test_frame *.o chat_history_*.txt nodes.dat identity.dat
 
 help:
 	@echo "Makefile targets:"

@@ -13,6 +13,11 @@
 
 static int disc_fd = -1;
 
+/* Our identity, set by discovery_bootstrap and stamped into each knock so the
+ * welcomer can recognise us and hand back our previous letter. */
+static char disc_my_id_hex[32] = "";
+static char disc_my_letter = '\0';
+
 /* ── Discovery socket ─────────────────────────────────────────── */
 
 int discovery_init(void) {
@@ -81,8 +86,11 @@ static char *send_discover_and_wait(const char *target_ip, int my_port,
     int opt = 1;
     setsockopt(bfd, SOL_SOCKET, SO_BROADCAST, &opt, sizeof(opt));
 
-    char packet[64];
-    snprintf(packet, sizeof(packet), "NET_DISCOVER:%d", my_port);
+    /* NET_DISCOVER:<port>:<id_hex>:<letter>  (letter '-' if we have none yet) */
+    char packet[96];
+    snprintf(packet, sizeof(packet), "NET_DISCOVER:%d:%s:%c",
+             my_port, disc_my_id_hex,
+             (disc_my_letter >= 'A' && disc_my_letter <= 'Z') ? disc_my_letter : '-');
 
     struct sockaddr_in dest = {0};
     dest.sin_family      = AF_INET;
@@ -133,10 +141,15 @@ static char *send_discover_and_wait(const char *target_ip, int my_port,
 /* ── Public: 3-layer bootstrap ────────────────────────────────── */
 
 char *discovery_bootstrap(int sock_fd, int my_port,
-                           const char *helper_ip, int helper_port)
+                           const char *helper_ip, int helper_port,
+                           const char *my_id_hex, char my_letter)
 {
     char *welcome = NULL;
     (void)helper_port; /* port is encoded in the packet payload */
+
+    strncpy(disc_my_id_hex, my_id_hex, sizeof(disc_my_id_hex) - 1);
+    disc_my_id_hex[sizeof(disc_my_id_hex) - 1] = '\0';
+    disc_my_letter = my_letter;
 
     /* Layer 1: Docker subnet broadcast (same-machine containers) */
     printf("[DISCOVERY] Layer 1: subnet broadcast (10.10.0.255)...\n");
@@ -187,9 +200,12 @@ void discovery_handle_incoming(on_new_peer_fn on_new_peer) {
     memcpy(buf, payload, pl);
     buf[pl] = '\0';
 
-    /* Expect "NET_DISCOVER:<port>" */
+    /* Expect "NET_DISCOVER:<port>:<id_hex>:<letter>" */
     int new_port = 0;
-    if (sscanf(buf, "NET_DISCOVER:%d", &new_port) != 1 || new_port <= 0)
+    char id_hex[32] = "";
+    char want_letter = '-';
+    if (sscanf(buf, "NET_DISCOVER:%d:%31[^:]:%c", &new_port, id_hex, &want_letter) < 2
+        || new_port <= 0)
         return;
 
     /* Extract sender IP from the recvfrom address */
@@ -199,5 +215,5 @@ void discovery_handle_incoming(on_new_peer_fn on_new_peer) {
     printf("[DISCOVERY] Peer knocking: %s:%d\n", new_ip, new_port);
 
     /* Delegate to mesh_backend via callback */
-    if (on_new_peer) on_new_peer(new_ip, new_port);
+    if (on_new_peer) on_new_peer(new_ip, new_port, id_hex, want_letter);
 }

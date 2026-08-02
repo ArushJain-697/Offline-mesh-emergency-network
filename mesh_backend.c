@@ -201,6 +201,9 @@ static int encrypted_recvfrom(int fd, char *buf, int buf_len, struct mesh_hdr *o
 #define MAX_NODES 26
 #define MAX_IP_LEN 64
 #define NODES_DATA_FILE "nodes.dat"
+#define IDENTITY_FILE   "identity.dat"
+#define NODE_ID_BYTES   8
+#define NODE_ID_HEX     (2 * NODE_ID_BYTES + 1)   /* hex string + NUL */
 
 static int sock_fd = -1;
 static char node_name = 'A';
@@ -208,6 +211,12 @@ static char history_file[64];
 static int my_port_global = 0;
 static int sent_count = 0;
 static int recv_count = 0;
+
+/* Stable identity: a persistent random ID is this node's real address; the
+ * A–Z letter is just a human label bound to it. Keyed on the ID, a node that
+ * returns (new IP, new path) is the same peer — no ghost, no lost mail. */
+static uint8_t my_id[NODE_ID_BYTES];
+static char    my_id_hex[NODE_ID_HEX];
 
 static int send_seq[MAX_NODES] = {0};
 static int expected_seq[MAX_NODES] = {0};
@@ -217,12 +226,12 @@ static _Atomic char ack_from = '\0';
 
 static pthread_mutex_t nodes_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* --- NEW: Added last_seen timestamp --- */
 struct NodeInfo {
     char name;
+    uint8_t id[NODE_ID_BYTES];   /* stable identity — the real key */
     char ip[MAX_IP_LEN];
     int port;
-    time_t last_seen; 
+    time_t last_seen;
 };
 
 static struct NodeInfo nodes[MAX_NODES];
@@ -234,6 +243,53 @@ static void get_time_str(char *buf, size_t size) {
     strftime(buf, size, "%H:%M:%S", t);
 }
 
+/* --- Node identity: hex encode/decode + persistence --------------------- */
+static void id_to_hex(const uint8_t *id, char *hex) {
+    static const char *d = "0123456789abcdef";
+    for (int i = 0; i < NODE_ID_BYTES; i++) {
+        hex[2 * i]     = d[(id[i] >> 4) & 0xF];
+        hex[2 * i + 1] = d[id[i] & 0xF];
+    }
+    hex[2 * NODE_ID_BYTES] = '\0';
+}
+
+/* Parse exactly NODE_ID_BYTES of hex; returns 1 on success, 0 on malformed. */
+static int hex_to_id(const char *hex, uint8_t *id) {
+    if ((int)strlen(hex) < 2 * NODE_ID_BYTES) return 0;
+    for (int i = 0; i < NODE_ID_BYTES; i++) {
+        unsigned v;
+        if (sscanf(hex + 2 * i, "%2x", &v) != 1) return 0;
+        id[i] = (uint8_t)v;
+    }
+    return 1;
+}
+
+/* Load persisted (id, letter), or mint a fresh id on first ever boot.
+ * Returns the persisted letter, or '\0' if none saved yet. */
+static char load_identity(void) {
+    FILE *fp = fopen(IDENTITY_FILE, "r");
+    char letter = '\0';
+    char hex[NODE_ID_HEX] = {0};
+    if (fp) {
+        if (fscanf(fp, " %c %16s", &letter, hex) == 2 && hex_to_id(hex, my_id)) {
+            id_to_hex(my_id, my_id_hex);
+            fclose(fp);
+            return letter;
+        }
+        fclose(fp);
+    }
+    randombytes_buf(my_id, sizeof(my_id));   /* first boot — new permanent id */
+    id_to_hex(my_id, my_id_hex);
+    return '\0';
+}
+
+static void save_identity(char letter) {
+    FILE *fp = fopen(IDENTITY_FILE, "w");
+    if (!fp) return;
+    fprintf(fp, "%c %s\n", letter, my_id_hex);
+    fclose(fp);
+}
+
 static void write_history(const char *entry) {
     FILE *fp = fopen(history_file, "a");
     if (fp) { fprintf(fp, "%s\n", entry); fclose(fp); }
@@ -242,8 +298,11 @@ static void write_history(const char *entry) {
 static void save_nodes_file(void) {
     FILE *fp = fopen(NODES_DATA_FILE, "w");
     if (!fp) return;
-    for (int i = 0; i < node_count; i++)
-        fprintf(fp, "%c %s %d\n", nodes[i].name, nodes[i].ip, nodes[i].port);
+    char hex[NODE_ID_HEX];
+    for (int i = 0; i < node_count; i++) {
+        id_to_hex(nodes[i].id, hex);
+        fprintf(fp, "%c %s %s %d\n", nodes[i].name, hex, nodes[i].ip, nodes[i].port);
+    }
     fclose(fp);
 }
 
@@ -253,17 +312,27 @@ static int find_node_index(char name) {
     return -1;
 }
 
-static void add_or_update_node(char name, const char *ip, int port) {
+static int find_node_by_id(const uint8_t *id) {
+    for (int i = 0; i < node_count; i++)
+        if (memcmp(nodes[i].id, id, NODE_ID_BYTES) == 0) return i;
+    return -1;
+}
+
+/* Merge a peer keyed on its stable ID: same ID = same node, even if its IP,
+ * port, or path changed (this is what collapses the old IP-based ghosts). */
+static void add_or_update_node(char name, const uint8_t *id, const char *ip, int port) {
     pthread_mutex_lock(&nodes_mutex);
-    int idx = find_node_index(name);
+    int idx = find_node_by_id(id);
     time_t now = time(NULL);
     if (idx >= 0) {
+        nodes[idx].name = name;
         strncpy(nodes[idx].ip, ip, MAX_IP_LEN - 1);
         nodes[idx].ip[MAX_IP_LEN - 1] = '\0';
         nodes[idx].port = port;
         nodes[idx].last_seen = now;
     } else if (node_count < MAX_NODES) {
         nodes[node_count].name = name;
+        memcpy(nodes[node_count].id, id, NODE_ID_BYTES);
         strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
         nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
         nodes[node_count].port = port;
@@ -320,8 +389,8 @@ static int is_relayable(const char *buf) {
  * of failing the send, queue it and flush when the node is reachable again.
  * Fixed-size ring (bounded memory for the ESP32 target); entries expire so a
  * permanently-dead node's backlog can't pin memory forever.
- * ponytail: keyed by node LETTER — correct while a node keeps its letter for
- * the session; stable cryptographic identity is the real fix (future). */
+ * Keyed by node LETTER, which is now stable across reconnects because each
+ * node's letter is bound to its persistent ID (see load_identity). */
 #define OUTBOX_MAX      32
 #define OUTBOX_TTL_SEC  300      /* give up after 5 min undelivered */
 #define FLUSH_PER_TICK  4        /* cap blocking sends per heartbeat beat */
@@ -438,12 +507,14 @@ static void send_welcome(char to_name) {
     int offset = snprintf(payload, sizeof(payload), "NET_WELCOME:");
     int truncated = 0;
     for (int i = 0; i < node_count; i++) {
-        if ((int)sizeof(payload) - offset < 30) {
+        if ((int)sizeof(payload) - offset < 50) {
             truncated = 1;
             break;
         }
+        char hex[NODE_ID_HEX];
+        id_to_hex(nodes[i].id, hex);
         offset += snprintf(payload + offset, sizeof(payload) - offset,
-                           "%c:%s:%d,", nodes[i].name, nodes[i].ip, nodes[i].port);
+                           "%c:%s:%s:%d,", nodes[i].name, hex, nodes[i].ip, nodes[i].port);
     }
     if (truncated)
         printf("WARNING: NET_WELCOME payload truncated.\n");
@@ -529,30 +600,39 @@ static char next_available_letter(void) {
     return '\0';
 }
 
-static void on_new_peer_discovered(const char *ip, int port) {
-    if (port == my_port_global) return;
+static void on_new_peer_discovered(const char *ip, int port,
+                                   const char *id_hex, char want_letter) {
+    uint8_t pid[NODE_ID_BYTES];
+    if (!hex_to_id(id_hex, pid)) return;              /* malformed identity */
+    if (memcmp(pid, my_id, NODE_ID_BYTES) == 0) return; /* our own knock */
 
     pthread_mutex_lock(&nodes_mutex);
-    /* Already known (re-knock, broadcast seen twice, or reconnect)? Just
-       refresh liveness and re-welcome — never allocate a second letter. */
-    for (int i = 0; i < node_count; i++) {
-        if (strcmp(nodes[i].ip, ip) == 0 && nodes[i].port == port) {
-            char known = nodes[i].name;
-            nodes[i].last_seen = time(NULL);
-            pthread_mutex_unlock(&nodes_mutex);
-            send_welcome(known);
-            return;
-        }
+    /* Known by stable ID (reconnect, re-knock, different path/IP)? Refresh and
+       re-welcome under the SAME letter — this is what kills the IP ghosts. */
+    int idx = find_node_by_id(pid);
+    if (idx >= 0) {
+        char known = nodes[idx].name;
+        strncpy(nodes[idx].ip, ip, MAX_IP_LEN - 1);
+        nodes[idx].ip[MAX_IP_LEN - 1] = '\0';
+        nodes[idx].port = port;
+        nodes[idx].last_seen = time(NULL);
+        pthread_mutex_unlock(&nodes_mutex);
+        send_welcome(known);
+        return;
     }
 
-    char letter = next_available_letter();
+    /* New node: honour its claimed letter if free, else assign the next one. */
+    char letter = (want_letter >= 'A' && want_letter <= 'Z' &&
+                   find_node_index(want_letter) < 0)
+                  ? want_letter : next_available_letter();
     if (letter == '\0') {
         pthread_mutex_unlock(&nodes_mutex);
         printf("[DISCOVERY] Network full, rejecting peer %s:%d\n", ip, port);
         return;
     }
-    
+
     nodes[node_count].name = letter;
+    memcpy(nodes[node_count].id, pid, NODE_ID_BYTES);
     strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
     nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
     nodes[node_count].port = port;
@@ -564,7 +644,7 @@ static void on_new_peer_discovered(const char *ip, int port) {
     /* Announce the new node mesh-wide (flooded + relayed) so peers many hops
      * away learn it and can address it — not just the welcomer's neighbours. */
     char add_pkt[128];
-    snprintf(add_pkt, sizeof(add_pkt), "NET_ADD:%c:%s:%d", letter, ip, port);
+    snprintf(add_pkt, sizeof(add_pkt), "NET_ADD:%c:%s:%s:%d", letter, id_hex, ip, port);
     flood_packet(add_pkt, MESH_DEFAULT_TTL, NULL, NULL, 0);
 
     send_welcome(letter);
@@ -590,39 +670,49 @@ void backend_bootstrap(int port, const char *password, const char *helper_ip, in
     if (crypto_init(password) != 0) { fprintf(stderr, "Crypto init failed\n"); exit(1); }
     discovery_init();
 
+    /* Establish our permanent identity before knocking, and offer our previous
+     * letter so the network can hand it back to us on reconnect. */
+    char saved_letter = load_identity();
 
-    node_count = 0; 
+    node_count = 0;
     printf("[BOOTSTRAP] Searching for existing network on port %d...\n", port);
-    char *welcome = discovery_bootstrap(sock_fd, port, helper_ip, helper_port);
+    char *welcome = discovery_bootstrap(sock_fd, port, helper_ip, helper_port,
+                                        my_id_hex, saved_letter);
 
     if (welcome == NULL) {
         char my_ip[MAX_IP_LEN];
         discovery_get_my_ip(my_ip, sizeof(my_ip));
-        node_name = 'A';
+        node_name = (saved_letter >= 'A' && saved_letter <= 'Z') ? saved_letter : 'A';
         pthread_mutex_lock(&nodes_mutex);
-        nodes[0].name = 'A';
+        nodes[0].name = node_name;
+        memcpy(nodes[0].id, my_id, NODE_ID_BYTES);
         strncpy(nodes[0].ip, my_ip, MAX_IP_LEN - 1);
+        nodes[0].ip[MAX_IP_LEN - 1] = '\0';
         nodes[0].port = port;
         nodes[0].last_seen = time(NULL);
         node_count = 1;
         save_nodes_file();
         pthread_mutex_unlock(&nodes_mutex);
-        printf("[BOOTSTRAP] No peers found. Starting as Genesis Node A (%s:%d)\n", my_ip, port);
+        printf("[BOOTSTRAP] No peers found. Starting as Genesis Node %c (%s:%d)\n",
+               node_name, my_ip, port);
     } else {
         pthread_mutex_lock(&nodes_mutex);
         node_count = 0;
-        char *cursor = welcome + 12; 
+        char *cursor = welcome + 12;
         char entry[128];
         while (sscanf(cursor, "%127[^,]", entry) == 1) {
-            char n, ip[64]; int p;
-            if (sscanf(entry, "%c:%63[^:]:%d", &n, ip, &p) == 3) {
+            char n, hex[NODE_ID_HEX], ip[64]; int p;
+            uint8_t eid[NODE_ID_BYTES];
+            if (sscanf(entry, "%c:%16[^:]:%63[^:]:%d", &n, hex, ip, &p) == 4 &&
+                hex_to_id(hex, eid)) {
                 nodes[node_count].name = n;
+                memcpy(nodes[node_count].id, eid, NODE_ID_BYTES);
                 strncpy(nodes[node_count].ip, ip, MAX_IP_LEN - 1);
                 nodes[node_count].ip[MAX_IP_LEN - 1] = '\0';
                 nodes[node_count].port = p;
                 nodes[node_count].last_seen = time(NULL);
                 node_count++;
-                if (p == port) node_name = n;
+                if (memcmp(eid, my_id, NODE_ID_BYTES) == 0) node_name = n; /* our letter */
             }
             cursor = strchr(cursor, ',');
             if (!cursor) break;
@@ -634,6 +724,7 @@ void backend_bootstrap(int port, const char *password, const char *helper_ip, in
         printf("[BOOTSTRAP] Joined network as Node %c on port %d\n", node_name, port);
     }
 
+    save_identity(node_name);   /* remember the letter we ended up with */
     snprintf(history_file, sizeof(history_file), "chat_history_%c.txt", node_name);
     start_heartbeat_thread();
 }
@@ -726,10 +817,12 @@ int backend_receive(char *out, int max_len) {
     if (strncmp(buf, "HRT:", 4) == 0) return 0;
 
     if (strncmp(buf, "NET_ADD:", 8) == 0) {
-        char newName, newIP[64];
+        char newName, hex[NODE_ID_HEX], newIP[64];
         int newPort;
-        if (sscanf(buf + 8, "%c:%63[^:]:%d", &newName, newIP, &newPort) == 3) {
-            add_or_update_node(newName, newIP, newPort);
+        uint8_t nid[NODE_ID_BYTES];
+        if (sscanf(buf + 8, "%c:%16[^:]:%63[^:]:%d", &newName, hex, newIP, &newPort) == 4 &&
+            hex_to_id(hex, nid)) {
+            add_or_update_node(newName, nid, newIP, newPort);
             printf("\r\033[K>>> Node %c added to network (%s:%d)\nChoose: ", newName, newIP, newPort); fflush(stdout);
             char time_str[16]; get_time_str(time_str, sizeof(time_str));
             char log_entry[512];
@@ -743,9 +836,11 @@ int backend_receive(char *out, int max_len) {
         char *cursor = buf + 12;
         char entry[128];
         while (sscanf(cursor, "%127[^,]", entry) == 1) {
-            char n, ip[64]; int port;
-            if (sscanf(entry, "%c:%63[^:]:%d", &n, ip, &port) == 3)
-                add_or_update_node(n, ip, port);
+            char n, hex[NODE_ID_HEX], ip[64]; int port;
+            uint8_t eid[NODE_ID_BYTES];
+            if (sscanf(entry, "%c:%16[^:]:%63[^:]:%d", &n, hex, ip, &port) == 4 &&
+                hex_to_id(hex, eid))
+                add_or_update_node(n, eid, ip, port);
             cursor = strchr(cursor, ',');
             if (!cursor) break;
             cursor++;

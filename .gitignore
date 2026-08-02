@@ -1,6 +1,7 @@
 # Node state files
 nodes.dat
 nodes_*.dat
+identity.dat
 
 # Chat history logs
 chat_history_*.txt

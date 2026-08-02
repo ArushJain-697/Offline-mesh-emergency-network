@@ -10,7 +10,7 @@
 
 OMEN is a **single-subnet, flat mesh**. Every node communicates directly with every other node via UDP. There is no routing layer ,  all nodes must be reachable on the same subnet (same Wi-Fi, hotspot, or Docker bridge).
 
-Nodes are assigned letters A–Z. The first node to boot becomes Node A (the Genesis Node). Every subsequent node that joins is auto-assigned the next available letter via the bootstrap handshake.
+Each node has a permanent random 8-byte ID (persisted in `identity.dat`); the A–Z letter is a human-friendly label bound to that ID. The first node to boot becomes Node A (the Genesis Node); subsequent nodes are auto-assigned the next available letter. Because the letter is bound to the stable ID, a node that drops and rejoins — even from a new IP or path — keeps its letter, so addressing, dedup, and store-and-forward stay consistent.
 
 ---
 
@@ -203,13 +203,12 @@ docker-compose.yml
 
 ## Roadmap
 
-- Stable cryptographic node identity (replace ephemeral A–Z letters, so store-and-forward and dedup survive a node returning with a new letter)
-- Mesh-wide topology propagation (currently NET_ADD/WELCOME/LEAVE stay 1-hop)
+- ESP32 / LoRa transport behind the `mesh_frame` + `mesh_sendto` seam (the real remaining work — everything above it is transport-agnostic)
 - Per-fragment relay (currently each hop fully reassembles before re-flooding)
-- ESP32 / LoRa transport behind the mesh_frame + mesh_sendto seam
+- Distributed letter-assignment consensus (today a partition can hand two nodes the same letter until they merge; the stable ID makes this recoverable but not yet automatic)
 - Raspberry Pi / Android builds
 
-Done: multi-hop TTL relay (controlled flooding), store-and-forward outbox, message-ID dedup + replay drop, fragmentation/reassembly, compact binary framing.
+Done: multi-hop TTL relay (controlled flooding), mesh-wide topology, store-and-forward outbox, stable persistent node identity (letter bound to a permanent ID), message-ID dedup + replay drop, fragmentation/reassembly, compact binary framing.
 
 ---
 

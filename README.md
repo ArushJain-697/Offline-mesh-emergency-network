@@ -196,16 +196,20 @@ docker-compose.yml
 | Single subnet only | All nodes must share a subnet. No internet-routed or multi-hop operation. |
 | Max 26 nodes | Named A–Z. |
 | Stop-and-wait throughput | One in-flight message per sender at a time. |
-| No fragmentation | Messages above ~1984 bytes are truncated (2048 buffer minus 40-byte crypto overhead and protocol header). |
+| Fragmentation | Messages are split into ~198-byte fragments (250B MTU − 12B header − 40B crypto), reassembled at the destination; capped at 16 fragments (~3 KB). |
 | nodes.dat consistency | File writes are mutex-protected in memory but not atomic on disk. |
 
 ---
 
 ## Roadmap
 
-- Dijkstra-based multi-hop routing to relay messages through intermediate nodes
-- Store-and-forward for nodes that join after a message was sent
+- Stable cryptographic node identity (replace ephemeral A–Z letters, so store-and-forward and dedup survive a node returning with a new letter)
+- Mesh-wide topology propagation (currently NET_ADD/WELCOME/LEAVE stay 1-hop)
+- Per-fragment relay (currently each hop fully reassembles before re-flooding)
+- ESP32 / LoRa transport behind the mesh_frame + mesh_sendto seam
 - Raspberry Pi / Android builds
+
+Done: multi-hop TTL relay (controlled flooding), store-and-forward outbox, message-ID dedup + replay drop, fragmentation/reassembly, compact binary framing.
 
 ---
 

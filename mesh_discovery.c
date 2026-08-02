@@ -91,7 +91,7 @@ static char *send_discover_and_wait(const char *target_ip, int my_port,
 
     /* Frame then encrypt before sending so only keyholders can parse our knock */
     uint8_t framed[256];
-    int fl = mesh_frame_encode(MESH_DEFAULT_TTL, NULL, packet, strlen(packet),
+    int fl = mesh_frame_encode(MESH_DEFAULT_TTL, NULL, 0, 1, packet, strlen(packet),
                                framed, sizeof(framed));
     uint8_t enc[256];
     int enc_len = (fl < 0) ? -1

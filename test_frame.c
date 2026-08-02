@@ -12,7 +12,7 @@ int main(void) {
     uint8_t id[MESH_MSGID_BYTES] = {1,2,3,4,5,6,7,8};
     const char *msg = "DIR:0:A:hello flood zone";
     uint8_t out[256];
-    int fl = mesh_frame_encode(3, id, msg, strlen(msg), out, sizeof(out));
+    int fl = mesh_frame_encode(3, id, 2, 5, msg, strlen(msg), out, sizeof(out));
     assert(fl == MESH_HDR_BYTES + (int)strlen(msg));
 
     struct mesh_hdr hdr;
@@ -22,6 +22,7 @@ int main(void) {
     assert(memcmp(payload, msg, pl) == 0);
     assert(hdr.version == MESH_PROTO_VERSION);
     assert(hdr.ttl == 3);
+    assert(hdr.frag_index == 2 && hdr.frag_count == 5);
     assert(memcmp(hdr.msg_id, id, MESH_MSGID_BYTES) == 0);
 
     /* wrong version is rejected */
@@ -33,8 +34,8 @@ int main(void) {
 
     /* null id path produces distinct random ids */
     uint8_t a[64], b[64];
-    mesh_frame_encode(7, NULL, "x", 1, a, sizeof(a));
-    mesh_frame_encode(7, NULL, "x", 1, b, sizeof(b));
+    mesh_frame_encode(7, NULL, 0, 1, "x", 1, a, sizeof(a));
+    mesh_frame_encode(7, NULL, 0, 1, "x", 1, b, sizeof(b));
     assert(memcmp(a + 4, b + 4, MESH_MSGID_BYTES) != 0);
 
     printf("test_frame: all assertions passed\n");

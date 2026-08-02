@@ -3,6 +3,7 @@
 #include <string.h>
 
 int mesh_frame_encode(uint8_t ttl, const uint8_t *id,
+                      uint8_t frag_index, uint8_t frag_count,
                       const char *payload, int payload_len,
                       uint8_t *out, int out_len)
 {
@@ -10,8 +11,8 @@ int mesh_frame_encode(uint8_t ttl, const uint8_t *id,
 
     out[0] = MESH_PROTO_VERSION;
     out[1] = ttl;
-    out[2] = 0;  /* flags    */
-    out[3] = 0;  /* reserved */
+    out[2] = frag_index;
+    out[3] = frag_count;
     if (id) memcpy(out + 4, id, MESH_MSGID_BYTES);
     else    randombytes_buf(out + 4, MESH_MSGID_BYTES);
 
@@ -26,10 +27,10 @@ int mesh_frame_decode(const uint8_t *buf, int buf_len,
     if (buf[0] != MESH_PROTO_VERSION)  return -1;
 
     if (hdr) {
-        hdr->version  = buf[0];
-        hdr->ttl      = buf[1];
-        hdr->flags    = buf[2];
-        hdr->reserved = buf[3];
+        hdr->version    = buf[0];
+        hdr->ttl        = buf[1];
+        hdr->frag_index = buf[2];
+        hdr->frag_count = buf[3];
         memcpy(hdr->msg_id, buf + 4, MESH_MSGID_BYTES);
     }
     if (payload) *payload = (const char *)(buf + MESH_HDR_BYTES);

@@ -24,51 +24,150 @@ static _Atomic int backend_running = 1;
  * ever shows up in a profile. */
 #define DEDUP_CACHE 256
 static uint8_t dedup_ids[DEDUP_CACHE][MESH_MSGID_BYTES];
+static uint8_t dedup_idx[DEDUP_CACHE];   /* per-fragment: (msg_id, index) is the key */
 static int dedup_pos = 0;
 static int dedup_len = 0;
 static pthread_mutex_t dedup_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static void dedup_remember(const uint8_t *id) {
+static void dedup_remember(const uint8_t *id, uint8_t index) {
     pthread_mutex_lock(&dedup_mutex);
     memcpy(dedup_ids[dedup_pos], id, MESH_MSGID_BYTES);
+    dedup_idx[dedup_pos] = index;
     dedup_pos = (dedup_pos + 1) % DEDUP_CACHE;
     if (dedup_len < DEDUP_CACHE) dedup_len++;
     pthread_mutex_unlock(&dedup_mutex);
 }
 
-static int seen_recently(const uint8_t *id) {
+static int seen_recently(const uint8_t *id, uint8_t index) {
     pthread_mutex_lock(&dedup_mutex);
     for (int i = 0; i < dedup_len; i++) {
-        if (memcmp(dedup_ids[i], id, MESH_MSGID_BYTES) == 0) {
+        if (dedup_idx[i] == index &&
+            memcmp(dedup_ids[i], id, MESH_MSGID_BYTES) == 0) {
             pthread_mutex_unlock(&dedup_mutex);
             return 1;
         }
     }
     pthread_mutex_unlock(&dedup_mutex);
-    dedup_remember(id);
+    dedup_remember(id, index);
     return 0;
 }
 
-/* Frame (binary header + payload) then encrypt then send. id==NULL mints a
- * fresh id (new-origin message); pass an id to preserve it when relaying. */
+/* Largest usable payload per packet after header + crypto. Sized to a LoRa-ish
+ * MTU so long messages fragment the same on radio as on UDP (and the path is
+ * actually exercised today rather than being dead speculative code). */
+#define MESH_MTU      250
+#define FRAG_PAYLOAD  (MESH_MTU - MESH_HDR_BYTES - 40)   /* 40 = crypto_overhead() */
+
+/* Frame (binary header + payload) then encrypt then send, splitting into
+ * fragments when the payload exceeds one MTU. id==NULL mints a fresh id
+ * (new-origin message); pass an id to preserve it when relaying. Each fragment
+ * shares the id and is remembered so our own copies never re-enter our
+ * reassembler/handlers. */
 static ssize_t mesh_sendto(int fd, uint8_t ttl, const uint8_t *id,
                            const char *buf, size_t len,
                            const struct sockaddr *dest, socklen_t dest_len)
 {
-    uint8_t framed[2048];
-    int fl = mesh_frame_encode(ttl, id, buf, (int)len, framed, sizeof(framed));
-    if (fl < 0) return -1;
+    uint8_t group[MESH_MSGID_BYTES];
+    if (id) memcpy(group, id, sizeof(group));
+    else    randombytes_buf(group, sizeof(group));
 
-    uint8_t enc[2048];
-    int enc_len = crypto_encrypt_packet(framed, fl, enc, sizeof(enc));
-    if (enc_len < 0) return -1;
-    return sendto(fd, enc, enc_len, 0, dest, dest_len);
+    int total = (int)len;
+    int count = (total + FRAG_PAYLOAD - 1) / FRAG_PAYLOAD;
+    if (count < 1) count = 1;
+    if (count > MESH_MAX_FRAGS) return -1;   /* too big to reassemble — refuse */
+
+    ssize_t last = -1;
+    for (int idx = 0; idx < count; idx++) {
+        int off = idx * FRAG_PAYLOAD;
+        int chunk = total - off;
+        if (chunk > FRAG_PAYLOAD) chunk = FRAG_PAYLOAD;
+
+        uint8_t framed[MESH_MTU];
+        int fl = mesh_frame_encode(ttl, group, (uint8_t)idx, (uint8_t)count,
+                                   buf + off, chunk, framed, sizeof(framed));
+        if (fl < 0) return -1;
+        dedup_remember(group, (uint8_t)idx);
+
+        uint8_t enc[MESH_MTU + 64];
+        int enc_len = crypto_encrypt_packet(framed, fl, enc, sizeof(enc));
+        if (enc_len < 0) return -1;
+        last = sendto(fd, enc, enc_len, 0, dest, dest_len);
+    }
+    return last;
 }
 
 static ssize_t encrypted_sendto(int fd, const char *buf, size_t len,
                                  const struct sockaddr *dest, socklen_t dest_len)
 {
     return mesh_sendto(fd, MESH_DEFAULT_TTL, NULL, buf, len, dest, dest_len);
+}
+
+/* --- Bounded fragment reassembly ----------------------------------------
+ * Fixed slot table; oldest partial evicted when full and partials expire, so
+ * a lost fragment can't pin memory. ponytail: relayers reassemble a whole
+ * message then re-flood it (re-fragmenting) — simple and correct, at the cost
+ * of per-hop buffering; per-fragment forwarding is the upgrade if hops grow. */
+#define REASM_SLOTS    8
+#define REASM_MAX      (MESH_MAX_FRAGS * FRAG_PAYLOAD)
+#define REASM_TTL_SEC  30
+
+struct Reasm {
+    int      used;
+    uint8_t  id[MESH_MSGID_BYTES];
+    int      count;
+    uint32_t got_mask;
+    int      total_len;
+    time_t   started;
+    char     buf[REASM_MAX + 1];
+};
+static struct Reasm reasm[REASM_SLOTS];
+static pthread_mutex_t reasm_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+/* Feed one fragment. Returns the full message length into out on the fragment
+ * that completes it, else 0 (incomplete). */
+static int reasm_feed(const struct mesh_hdr *h, const char *payload, int pl,
+                      char *out, int out_len) {
+    if (h->frag_count == 0 || h->frag_count > MESH_MAX_FRAGS) return 0;
+    if (h->frag_index >= h->frag_count) return 0;
+
+    time_t now = time(NULL);
+    pthread_mutex_lock(&reasm_mutex);
+
+    int slot = -1, free_slot = -1, oldest = 0;
+    for (int i = 0; i < REASM_SLOTS; i++) {
+        if (reasm[i].used && now - reasm[i].started > REASM_TTL_SEC) reasm[i].used = 0;
+        if (reasm[i].used && memcmp(reasm[i].id, h->msg_id, MESH_MSGID_BYTES) == 0) { slot = i; break; }
+        if (!reasm[i].used && free_slot < 0) free_slot = i;
+        if (reasm[i].started < reasm[oldest].started) oldest = i;
+    }
+    if (slot < 0) {
+        slot = (free_slot >= 0) ? free_slot : oldest;
+        reasm[slot].used = 1;
+        memcpy(reasm[slot].id, h->msg_id, MESH_MSGID_BYTES);
+        reasm[slot].count = h->frag_count;
+        reasm[slot].got_mask = 0;
+        reasm[slot].total_len = 0;
+        reasm[slot].started = now;
+    }
+
+    int off = h->frag_index * FRAG_PAYLOAD;
+    if (off + pl > REASM_MAX) { pthread_mutex_unlock(&reasm_mutex); return 0; }
+    if (!(reasm[slot].got_mask & (1u << h->frag_index))) {
+        memcpy(reasm[slot].buf + off, payload, pl);
+        reasm[slot].got_mask |= (1u << h->frag_index);
+        reasm[slot].total_len += pl;
+    }
+
+    uint32_t full = (1u << h->frag_count) - 1;
+    if (reasm[slot].got_mask != full) { pthread_mutex_unlock(&reasm_mutex); return 0; }
+
+    int tlen = reasm[slot].total_len;
+    if (tlen > out_len - 1) tlen = out_len - 1;
+    memcpy(out, reasm[slot].buf, tlen);
+    out[tlen] = '\0';
+    reasm[slot].used = 0;
+    pthread_mutex_unlock(&reasm_mutex);
+    return tlen;
 }
 
 static int encrypted_recvfrom(int fd, char *buf, int buf_len, struct mesh_hdr *out_hdr,
@@ -85,14 +184,18 @@ static int encrypted_recvfrom(int fd, char *buf, int buf_len, struct mesh_hdr *o
     struct mesh_hdr hdr;
     const char *payload;
     int pl = mesh_frame_decode(plain, plain_n, &hdr, &payload);
-    if (pl < 0) return 0;                    /* not a v1 frame — drop */
-    if (seen_recently(hdr.msg_id)) return 0; /* duplicate or replay — drop */
+    if (pl < 0) return 0;                                     /* not a v1 frame */
+    if (seen_recently(hdr.msg_id, hdr.frag_index)) return 0;  /* duplicate/replay */
 
-    if (pl > buf_len - 1) pl = buf_len - 1;
-    memcpy(buf, payload, pl);
-    buf[pl] = '\0';
     if (out_hdr) *out_hdr = hdr;
-    return pl;
+
+    if (hdr.frag_count <= 1) {                 /* whole message in one packet */
+        if (pl > buf_len - 1) pl = buf_len - 1;
+        memcpy(buf, payload, pl);
+        buf[pl] = '\0';
+        return pl;
+    }
+    return reasm_feed(&hdr, payload, pl, buf, buf_len);  /* 0 until complete */
 }
 
 #define MAX_NODES 26
@@ -179,7 +282,8 @@ static void flood_packet(const char *payload, uint8_t ttl, const uint8_t *id,
                          const char *skip_ip, int skip_port) {
     uint8_t local_id[MESH_MSGID_BYTES];
     if (!id) { randombytes_buf(local_id, sizeof(local_id)); id = local_id; }
-    dedup_remember(id);
+    /* mesh_sendto remembers each (id, frag_index) it emits, so our own copies
+     * never echo back into the reassembler — nothing to pre-remember here. */
 
     pthread_mutex_lock(&nodes_mutex);
     struct NodeInfo snapshot[MAX_NODES];

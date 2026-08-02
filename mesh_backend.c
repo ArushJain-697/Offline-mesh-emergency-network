@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <sodium.h>
 #include "mesh_backend.h"
 #include "mesh_discovery.h"
 #include "mesh_crypto.h"
@@ -27,6 +28,14 @@ static int dedup_pos = 0;
 static int dedup_len = 0;
 static pthread_mutex_t dedup_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+static void dedup_remember(const uint8_t *id) {
+    pthread_mutex_lock(&dedup_mutex);
+    memcpy(dedup_ids[dedup_pos], id, MESH_MSGID_BYTES);
+    dedup_pos = (dedup_pos + 1) % DEDUP_CACHE;
+    if (dedup_len < DEDUP_CACHE) dedup_len++;
+    pthread_mutex_unlock(&dedup_mutex);
+}
+
 static int seen_recently(const uint8_t *id) {
     pthread_mutex_lock(&dedup_mutex);
     for (int i = 0; i < dedup_len; i++) {
@@ -35,10 +44,8 @@ static int seen_recently(const uint8_t *id) {
             return 1;
         }
     }
-    memcpy(dedup_ids[dedup_pos], id, MESH_MSGID_BYTES);
-    dedup_pos = (dedup_pos + 1) % DEDUP_CACHE;
-    if (dedup_len < DEDUP_CACHE) dedup_len++;
     pthread_mutex_unlock(&dedup_mutex);
+    dedup_remember(id);
     return 0;
 }
 
@@ -64,7 +71,7 @@ static ssize_t encrypted_sendto(int fd, const char *buf, size_t len,
     return mesh_sendto(fd, MESH_DEFAULT_TTL, NULL, buf, len, dest, dest_len);
 }
 
-static int encrypted_recvfrom(int fd, char *buf, int buf_len,
+static int encrypted_recvfrom(int fd, char *buf, int buf_len, struct mesh_hdr *out_hdr,
                                struct sockaddr *src, socklen_t *src_len)
 {
     uint8_t raw[2048];
@@ -84,6 +91,7 @@ static int encrypted_recvfrom(int fd, char *buf, int buf_len,
     if (pl > buf_len - 1) pl = buf_len - 1;
     memcpy(buf, payload, pl);
     buf[pl] = '\0';
+    if (out_hdr) *out_hdr = hdr;
     return pl;
 }
 
@@ -161,6 +169,45 @@ static void add_or_update_node(char name, const char *ip, int port) {
     }
     save_nodes_file();
     pthread_mutex_unlock(&nodes_mutex);
+}
+
+/* Flood a payload to every known peer under ONE shared msg_id, so relayers
+ * across the mesh collapse all copies into a single flood tree via dedup.
+ * Pre-remembers the id so our own packet never re-enters our handlers.
+ * skip_ip/skip_port omits the neighbour we received a relayed packet from. */
+static void flood_packet(const char *payload, uint8_t ttl, const uint8_t *id,
+                         const char *skip_ip, int skip_port) {
+    uint8_t local_id[MESH_MSGID_BYTES];
+    if (!id) { randombytes_buf(local_id, sizeof(local_id)); id = local_id; }
+    dedup_remember(id);
+
+    pthread_mutex_lock(&nodes_mutex);
+    struct NodeInfo snapshot[MAX_NODES];
+    int snap_count = node_count;
+    memcpy(snapshot, nodes, sizeof(struct NodeInfo) * node_count);
+    pthread_mutex_unlock(&nodes_mutex);
+
+    for (int i = 0; i < snap_count; i++) {
+        if (snapshot[i].name == node_name) continue;
+        if (skip_ip && snapshot[i].port == skip_port &&
+            strcmp(snapshot[i].ip, skip_ip) == 0) continue;
+        struct sockaddr_in d;
+        memset(&d, 0, sizeof(d));
+        d.sin_family = AF_INET;
+        d.sin_port   = htons(snapshot[i].port);
+        if (inet_pton(AF_INET, snapshot[i].ip, &d.sin_addr) <= 0) continue;
+        mesh_sendto(sock_fd, ttl, id, payload, strlen(payload),
+                    (struct sockaddr *)&d, sizeof(d));
+    }
+}
+
+/* Topology + per-link heartbeat stay 1-hop; DIR/ACK/broadcast get relayed. */
+static int is_relayable(const char *buf) {
+    if (strncmp(buf, "HRT:", 4) == 0)          return 0;
+    if (strncmp(buf, "NET_ADD:", 8) == 0)      return 0;
+    if (strncmp(buf, "NET_WELCOME:", 12) == 0) return 0;
+    if (strncmp(buf, "NET_LEAVE:", 10) == 0)   return 0;
+    return 1;
 }
 
 static void send_welcome(char to_name) {
@@ -384,24 +431,14 @@ void backend_bootstrap(int port, const char *password, const char *helper_ip, in
 }
 
 void backend_send_message(char to, const char *msg) {
-    pthread_mutex_lock(&nodes_mutex);
-    int idx = find_node_index(to);
-    if (idx < 0) { pthread_mutex_unlock(&nodes_mutex); printf("Unknown node %c\n", to); return; }
-
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family      = AF_INET;
-    dest.sin_port        = htons(nodes[idx].port);
-    if (inet_pton(AF_INET, nodes[idx].ip, &dest.sin_addr) <= 0) {
-        pthread_mutex_unlock(&nodes_mutex); return;
-    }
-    pthread_mutex_unlock(&nodes_mutex);
-
-    char packet[1100];
     int to_idx = to - 'A';
-    if (to_idx < 0 || to_idx >= MAX_NODES) return;
+    if (to_idx < 0 || to_idx >= MAX_NODES) { printf("Unknown node %c\n", to); return; }
+
+    /* Multi-hop unicast = controlled flood carrying an explicit destination.
+     * Every node relays it; only `to` consumes and ACKs. No routing table. */
+    char packet[1100];
     int seq = send_seq[to_idx];
-    snprintf(packet, sizeof(packet), "DIR:%d:%c:%s", seq, node_name, msg);
+    snprintf(packet, sizeof(packet), "DIR:%c:%d:%c:%s", to, seq, node_name, msg);
 
     ack_expected = seq;
     ack_from = to;
@@ -409,8 +446,8 @@ void backend_send_message(char to, const char *msg) {
 
     int attempts = 0;
     while (attempts < 3) {
-        encrypted_sendto(sock_fd, packet, strlen(packet), (struct sockaddr *)&dest, sizeof(dest));
-        
+        flood_packet(packet, MESH_DEFAULT_TTL, NULL, NULL, 0);
+
         for (int i = 0; i < 50; i++) {
             if (ack_received == 1) break;
             usleep(20 * 1000); 
@@ -441,22 +478,9 @@ void backend_broadcast(const char *msg) {
     char packet[1100];
     snprintf(packet, sizeof(packet), "%c|(broadcasted) %s", node_name, msg);
 
-    pthread_mutex_lock(&nodes_mutex);
-    struct NodeInfo snapshot[MAX_NODES];
-    int snap_count = node_count;
-    memcpy(snapshot, nodes, sizeof(struct NodeInfo) * node_count);
-    pthread_mutex_unlock(&nodes_mutex);
-
-    for (int i = 0; i < snap_count; i++) {
-        if (snapshot[i].name == node_name) continue;
-        struct sockaddr_in dest;
-        memset(&dest, 0, sizeof(dest));
-        dest.sin_family      = AF_INET;
-        dest.sin_port        = htons(snapshot[i].port);
-        if (inet_pton(AF_INET, snapshot[i].ip, &dest.sin_addr) <= 0) continue;
-        if (encrypted_sendto(sock_fd, packet, strlen(packet), (struct sockaddr *)&dest, sizeof(dest)) > 0)
-            sent_count++;  
-    }
+    /* Flood to the whole mesh (TTL-bounded) — the disaster alert path. */
+    flood_packet(packet, MESH_DEFAULT_TTL, NULL, NULL, 0);
+    sent_count++;
 
     char time_str[16]; get_time_str(time_str, sizeof(time_str));
     char log_entry[1200];
@@ -488,19 +512,22 @@ int backend_receive(char *out, int max_len) {
     /* --- NEW: Capture sender IP/Port so we can prove they are alive --- */
     struct sockaddr_in sender_addr;
     socklen_t sender_len = sizeof(sender_addr);
-    int bytes = encrypted_recvfrom(sock_fd, buf, read_limit, (struct sockaddr *)&sender_addr, &sender_len);
-    
+    struct mesh_hdr hdr = {0};
+    int bytes = encrypted_recvfrom(sock_fd, buf, read_limit, &hdr,
+                                   (struct sockaddr *)&sender_addr, &sender_len);
+
     if (bytes < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
         return -1;
     }
+    if (bytes == 0) return 0;   /* decrypt fail, bad frame, or dedup drop */
     buf[bytes] = '\0';
 
     /* Mark sender as alive immediately */
     char sender_ip[64];
     inet_ntop(AF_INET, &sender_addr.sin_addr, sender_ip, sizeof(sender_ip));
     int sender_port = ntohs(sender_addr.sin_port);
-    
+
     pthread_mutex_lock(&nodes_mutex);
     for (int i = 0; i < node_count; i++) {
         if (strcmp(nodes[i].ip, sender_ip) == 0 && nodes[i].port == sender_port) {
@@ -509,6 +536,12 @@ int backend_receive(char *out, int max_len) {
         }
     }
     pthread_mutex_unlock(&nodes_mutex);
+
+    /* Multi-hop relay: forward not-yet-seen data packets one hop closer to
+     * exhaustion. Dedup guarantees we relay each packet at most once, which is
+     * exactly what bounds the flood. */
+    if (hdr.ttl > 1 && is_relayable(buf))
+        flood_packet(buf, hdr.ttl - 1, hdr.msg_id, sender_ip, sender_port);
 
     /* Ignore Heartbeat packets so they don't spam the chat */
     if (strncmp(buf, "HRT:", 4) == 0) return 0;
@@ -563,8 +596,9 @@ int backend_receive(char *out, int max_len) {
     }
 
     if (strncmp(buf, "ACK:", 4) == 0) {
-        int seq; char sender;
-        if (sscanf(buf + 4, "%d:%c", &seq, &sender) == 2) {
+        char dst; int seq; char sender;
+        if (sscanf(buf + 4, "%c:%d:%c", &dst, &seq, &sender) == 3) {
+            if (dst != node_name) return 0;   /* not our ACK — relay handled it */
             if (sender == ack_from && seq == ack_expected) {
                 ack_received = 1;
             }
@@ -573,23 +607,16 @@ int backend_receive(char *out, int max_len) {
     }
 
     if (strncmp(buf, "DIR:", 4) == 0) {
-        int seq; char sender;
+        char dst; int seq; char sender;
         char msg_content[1024];
-        if (sscanf(buf + 4, "%d:%c:%1023[^\n]", &seq, &sender, msg_content) == 3) {
+        if (sscanf(buf + 4, "%c:%d:%c:%1023[^\n]", &dst, &seq, &sender, msg_content) == 4) {
+            if (dst != node_name) return 0;   /* not for us — relay already forwarded it */
+
+            /* ACK back to the sender, flooded so it survives the return path. */
             char ack_pkt[32];
-            snprintf(ack_pkt, sizeof(ack_pkt), "ACK:%d:%c", seq, node_name);
-            pthread_mutex_lock(&nodes_mutex);
-            int idx = find_node_index(sender);
-            if (idx >= 0) {
-                struct sockaddr_in dest;
-                memset(&dest, 0, sizeof(dest));
-                dest.sin_family = AF_INET;
-                dest.sin_port = htons(nodes[idx].port);
-                inet_pton(AF_INET, nodes[idx].ip, &dest.sin_addr);
-                encrypted_sendto(sock_fd, ack_pkt, strlen(ack_pkt), (struct sockaddr *)&dest, sizeof(dest));
-            }
-            pthread_mutex_unlock(&nodes_mutex);
-            
+            snprintf(ack_pkt, sizeof(ack_pkt), "ACK:%c:%d:%c", sender, seq, node_name);
+            flood_packet(ack_pkt, MESH_DEFAULT_TTL, NULL, NULL, 0);
+
             int sender_idx = sender - 'A';
             if (sender_idx >= 0 && sender_idx < MAX_NODES) {
                 if (seq == expected_seq[sender_idx]) {
@@ -600,7 +627,7 @@ int backend_receive(char *out, int max_len) {
                     recv_count++;
                     return strlen(out);
                 } else {
-                    return 0; 
+                    return 0;
                 }
             }
         }

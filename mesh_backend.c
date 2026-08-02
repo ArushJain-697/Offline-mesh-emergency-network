@@ -210,6 +210,120 @@ static int is_relayable(const char *buf) {
     return 1;
 }
 
+/* --- Store-and-forward outbox -------------------------------------------
+ * A disaster node drops off (power blip, radio fade) and comes back. Instead
+ * of failing the send, queue it and flush when the node is reachable again.
+ * Fixed-size ring (bounded memory for the ESP32 target); entries expire so a
+ * permanently-dead node's backlog can't pin memory forever.
+ * ponytail: keyed by node LETTER — correct while a node keeps its letter for
+ * the session; stable cryptographic identity is the real fix (future). */
+#define OUTBOX_MAX      32
+#define OUTBOX_TTL_SEC  300      /* give up after 5 min undelivered */
+#define FLUSH_PER_TICK  4        /* cap blocking sends per heartbeat beat */
+
+struct OutboxMsg { char to; char msg[512]; time_t queued; int used; };
+static struct OutboxMsg outbox[OUTBOX_MAX];
+static pthread_mutex_t outbox_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t send_mutex   = PTHREAD_MUTEX_INITIALIZER; /* one ARQ txn at a time */
+
+/* One stop-and-wait ARQ transaction. Returns 1 on ACK, 0 on give-up.
+ * send_mutex serializes the shared ack_* state so a heartbeat-thread flush and
+ * a main-thread send can't stomp each other. */
+static int deliver(char to, const char *msg) {
+    int to_idx = to - 'A';
+    if (to_idx < 0 || to_idx >= MAX_NODES) return 0;
+
+    pthread_mutex_lock(&send_mutex);
+    char packet[1100];
+    int seq = send_seq[to_idx];
+    snprintf(packet, sizeof(packet), "DIR:%c:%d:%c:%s", to, seq, node_name, msg);
+
+    ack_expected = seq;
+    ack_from     = to;
+    ack_received = 0;
+
+    int attempts = 0, ok = 0;
+    while (attempts < 3) {
+        flood_packet(packet, MESH_DEFAULT_TTL, NULL, NULL, 0);
+        for (int i = 0; i < 50; i++) {
+            if (ack_received == 1) break;
+            usleep(20 * 1000);
+        }
+        if (ack_received == 1) { ok = 1; break; }
+        attempts++;
+        if (attempts < 3) {
+            printf("\r\033[K[SYSTEM] Retransmitting to %c (Attempt %d)...\nChoose: ", to, attempts + 1);
+            fflush(stdout);
+        }
+    }
+    if (ok) {
+        send_seq[to_idx] = 1 - send_seq[to_idx];
+        sent_count++;
+        char time_str[16]; get_time_str(time_str, sizeof(time_str));
+        char log_entry[1200];
+        snprintf(log_entry, sizeof(log_entry), "[%s] Me -> %c: %s", time_str, to, msg);
+        write_history(log_entry);
+    }
+    pthread_mutex_unlock(&send_mutex);
+    return ok;
+}
+
+static void outbox_enqueue(char to, const char *msg) {
+    pthread_mutex_lock(&outbox_mutex);
+    int slot = -1;
+    for (int i = 0; i < OUTBOX_MAX; i++)
+        if (!outbox[i].used) { slot = i; break; }
+    if (slot < 0) {                       /* full: overwrite the oldest entry */
+        slot = 0;
+        for (int i = 1; i < OUTBOX_MAX; i++)
+            if (outbox[i].queued < outbox[slot].queued) slot = i;
+    }
+    outbox[slot].to = to;
+    strncpy(outbox[slot].msg, msg, sizeof(outbox[slot].msg) - 1);
+    outbox[slot].msg[sizeof(outbox[slot].msg) - 1] = '\0';
+    outbox[slot].queued = time(NULL);
+    outbox[slot].used = 1;
+    pthread_mutex_unlock(&outbox_mutex);
+}
+
+/* Attempt queued deliveries to nodes currently in the registry. Runs on the
+ * heartbeat thread (NOT holding nodes_mutex) so deliver()'s ACK wait doesn't
+ * block the receiver thread. */
+static void outbox_flush(void) {
+    time_t now = time(NULL);
+    int done = 0;
+    for (int i = 0; i < OUTBOX_MAX && done < FLUSH_PER_TICK; i++) {
+        pthread_mutex_lock(&outbox_mutex);
+        if (!outbox[i].used) { pthread_mutex_unlock(&outbox_mutex); continue; }
+        if (now - outbox[i].queued > OUTBOX_TTL_SEC) {   /* expired — drop */
+            outbox[i].used = 0;
+            pthread_mutex_unlock(&outbox_mutex);
+            printf("\r\033[K[SYSTEM] Queued message to %c expired undelivered.\nChoose: ", outbox[i].to);
+            fflush(stdout);
+            continue;
+        }
+        char to = outbox[i].to;
+        char msg[512];
+        strncpy(msg, outbox[i].msg, sizeof(msg));
+        msg[sizeof(msg) - 1] = '\0';
+        pthread_mutex_unlock(&outbox_mutex);
+
+        pthread_mutex_lock(&nodes_mutex);
+        int known = find_node_index(to) >= 0;
+        pthread_mutex_unlock(&nodes_mutex);
+        if (!known) continue;             /* still gone — keep it queued */
+
+        done++;
+        if (deliver(to, msg)) {
+            pthread_mutex_lock(&outbox_mutex);
+            outbox[i].used = 0;
+            pthread_mutex_unlock(&outbox_mutex);
+            printf("\r\033[K[SYSTEM] Queued message to %c delivered.\nChoose: ", to);
+            fflush(stdout);
+        }
+    }
+}
+
 static void send_welcome(char to_name) {
     pthread_mutex_lock(&nodes_mutex);
     int idx = find_node_index(to_name);
@@ -291,6 +405,8 @@ static void *heartbeat_loop(void *arg) {
             }
         }
         pthread_mutex_unlock(&nodes_mutex);
+
+        outbox_flush();   /* retry queued mail to any node that's back */
     }
     return NULL;
 }
@@ -436,42 +552,13 @@ void backend_send_message(char to, const char *msg) {
 
     /* Multi-hop unicast = controlled flood carrying an explicit destination.
      * Every node relays it; only `to` consumes and ACKs. No routing table. */
-    char packet[1100];
-    int seq = send_seq[to_idx];
-    snprintf(packet, sizeof(packet), "DIR:%c:%d:%c:%s", to, seq, node_name, msg);
+    if (deliver(to, msg)) return;
 
-    ack_expected = seq;
-    ack_from = to;
-    ack_received = 0;
-
-    int attempts = 0;
-    while (attempts < 3) {
-        flood_packet(packet, MESH_DEFAULT_TTL, NULL, NULL, 0);
-
-        for (int i = 0; i < 50; i++) {
-            if (ack_received == 1) break;
-            usleep(20 * 1000); 
-        }
-        
-        if (ack_received == 1) break;
-        attempts++;
-        if (attempts < 3) {
-            printf("\r\033[K[SYSTEM] Retransmitting to %c (Attempt %d)...\nChoose: ", to, attempts + 1);
-            fflush(stdout);
-        }
-    }
-
-    if (ack_received == 1) {
-        send_seq[to_idx] = 1 - send_seq[to_idx];
-        sent_count++;
-        char time_str[16]; get_time_str(time_str, sizeof(time_str));
-        char log_entry[1200];
-        snprintf(log_entry, sizeof(log_entry), "[%s] Me -> %c: %s", time_str, to, msg);
-        write_history(log_entry);
-    } else {
-        printf("\r\033[K[ERROR] Message delivery to %c failed. Node might be offline.\nChoose: ", to);
-        fflush(stdout);
-    }
+    /* Unreachable now — hold it and let the heartbeat flush retry when the
+     * node returns, instead of losing the message. */
+    outbox_enqueue(to, msg);
+    printf("\r\033[K[SYSTEM] %c unreachable — queued for delivery when it returns.\nChoose: ", to);
+    fflush(stdout);
 }
 
 void backend_broadcast(const char *msg) {

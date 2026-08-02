@@ -67,6 +67,8 @@ int main(int argc, char **argv) {
     printf("Choose: ");
     if (!get_line(line, sizeof(line))) {
       printf("Input error, exiting.\n");
+      backend_leave();
+      running = 0;   /* stop the receiver thread so pthread_join won't hang */
       break;
     }
     int op = atoi(line);

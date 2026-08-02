@@ -7,6 +7,7 @@ chat_history_*.txt
 mesh.key
 # Compiled binaries
 mesh_cli
+test_frame
 add_node
 
 # Object files

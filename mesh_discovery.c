@@ -1,5 +1,6 @@
 #include "mesh_discovery.h"
 #include "mesh_crypto.h"
+#include "mesh_frame.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,10 +89,13 @@ static char *send_discover_and_wait(const char *target_ip, int my_port,
     dest.sin_port        = htons(DISCOVERY_PORT);
     inet_pton(AF_INET, target_ip, &dest.sin_addr);
 
-    /* Encrypt before sending so only keyholders can parse our knock */
+    /* Frame then encrypt before sending so only keyholders can parse our knock */
+    uint8_t framed[256];
+    int fl = mesh_frame_encode(MESH_DEFAULT_TTL, NULL, packet, strlen(packet),
+                               framed, sizeof(framed));
     uint8_t enc[256];
-    int enc_len = crypto_encrypt_packet((const uint8_t *)packet, strlen(packet),
-                                         enc, sizeof(enc));
+    int enc_len = (fl < 0) ? -1
+                : crypto_encrypt_packet(framed, fl, enc, sizeof(enc));
     if (enc_len > 0)
         sendto(bfd, enc, enc_len, 0, (struct sockaddr *)&dest, sizeof(dest));
     close(bfd);
@@ -105,19 +109,24 @@ static char *send_discover_and_wait(const char *target_ip, int my_port,
     if (select(sock_fd + 1, &rfds, NULL, NULL, &tv) <= 0)
         return NULL;
 
-    /* Decrypt the incoming NET_WELCOME */
+    /* Decrypt + deframe the incoming NET_WELCOME */
     uint8_t raw[2048];
     int raw_n = recv(sock_fd, raw, sizeof(raw), 0);
     if (raw_n <= 0) return NULL;
 
-    char *buf = malloc(2048);
+    uint8_t plain[2048];
+    int plain_n = crypto_decrypt_packet(raw, raw_n, plain, sizeof(plain));
+    if (plain_n <= 0) return NULL;
+
+    struct mesh_hdr hdr;
+    const char *payload;
+    int pl = mesh_frame_decode(plain, plain_n, &hdr, &payload);
+    if (pl <= 0 || strncmp(payload, "NET_WELCOME:", 12) != 0) return NULL;
+
+    char *buf = malloc(pl + 1);
     if (!buf) return NULL;
-    int plain_n = crypto_decrypt_packet(raw, raw_n, (uint8_t *)buf, 2047);
-    if (plain_n <= 0 || strncmp(buf, "NET_WELCOME:", 12) != 0) {
-        free(buf);
-        return NULL;
-    }
-    buf[plain_n] = '\0';
+    memcpy(buf, payload, pl);
+    buf[pl] = '\0';
     return buf;
 }
 
@@ -163,11 +172,20 @@ void discovery_handle_incoming(on_new_peer_fn on_new_peer) {
                          (struct sockaddr *)&sender, &slen);
     if (raw_n <= 0) return;
 
-    /* Decrypt — silently ignore packets from nodes without the key */
-    char buf[128];
-    int n = crypto_decrypt_packet(raw, raw_n, (uint8_t *)buf, sizeof(buf) - 1);
+    /* Decrypt + deframe — silently ignore packets from nodes without the key */
+    uint8_t plain[256];
+    int n = crypto_decrypt_packet(raw, raw_n, plain, sizeof(plain));
     if (n <= 0) return;
-    buf[n] = '\0';
+
+    struct mesh_hdr hdr;
+    const char *payload;
+    int pl = mesh_frame_decode(plain, n, &hdr, &payload);
+    if (pl <= 0) return;
+
+    char buf[128];
+    if (pl > (int)sizeof(buf) - 1) pl = sizeof(buf) - 1;
+    memcpy(buf, payload, pl);
+    buf[pl] = '\0';
 
     /* Expect "NET_DISCOVER:<port>" */
     int new_port = 0;

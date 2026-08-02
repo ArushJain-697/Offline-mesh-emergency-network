@@ -13,17 +13,55 @@
 #include "mesh_backend.h"
 #include "mesh_discovery.h"
 #include "mesh_crypto.h"
+#include "mesh_frame.h"
 
 static _Atomic int backend_running = 1;
+
+/* --- Bounded dedup cache: drop duplicate (relayed) and replayed packets ---
+ * Fixed-size ring so memory never grows — required for the ESP32 target.
+ * ponytail: O(n) linear scan over 256 ids; a Bloom filter only if this
+ * ever shows up in a profile. */
+#define DEDUP_CACHE 256
+static uint8_t dedup_ids[DEDUP_CACHE][MESH_MSGID_BYTES];
+static int dedup_pos = 0;
+static int dedup_len = 0;
+static pthread_mutex_t dedup_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static int seen_recently(const uint8_t *id) {
+    pthread_mutex_lock(&dedup_mutex);
+    for (int i = 0; i < dedup_len; i++) {
+        if (memcmp(dedup_ids[i], id, MESH_MSGID_BYTES) == 0) {
+            pthread_mutex_unlock(&dedup_mutex);
+            return 1;
+        }
+    }
+    memcpy(dedup_ids[dedup_pos], id, MESH_MSGID_BYTES);
+    dedup_pos = (dedup_pos + 1) % DEDUP_CACHE;
+    if (dedup_len < DEDUP_CACHE) dedup_len++;
+    pthread_mutex_unlock(&dedup_mutex);
+    return 0;
+}
+
+/* Frame (binary header + payload) then encrypt then send. id==NULL mints a
+ * fresh id (new-origin message); pass an id to preserve it when relaying. */
+static ssize_t mesh_sendto(int fd, uint8_t ttl, const uint8_t *id,
+                           const char *buf, size_t len,
+                           const struct sockaddr *dest, socklen_t dest_len)
+{
+    uint8_t framed[2048];
+    int fl = mesh_frame_encode(ttl, id, buf, (int)len, framed, sizeof(framed));
+    if (fl < 0) return -1;
+
+    uint8_t enc[2048];
+    int enc_len = crypto_encrypt_packet(framed, fl, enc, sizeof(enc));
+    if (enc_len < 0) return -1;
+    return sendto(fd, enc, enc_len, 0, dest, dest_len);
+}
 
 static ssize_t encrypted_sendto(int fd, const char *buf, size_t len,
                                  const struct sockaddr *dest, socklen_t dest_len)
 {
-    uint8_t enc[2048];
-    int enc_len = crypto_encrypt_packet((const uint8_t *)buf, (int)len,
-                                         enc, sizeof(enc));
-    if (enc_len < 0) return -1;
-    return sendto(fd, enc, enc_len, 0, dest, dest_len);
+    return mesh_sendto(fd, MESH_DEFAULT_TTL, NULL, buf, len, dest, dest_len);
 }
 
 static int encrypted_recvfrom(int fd, char *buf, int buf_len,
@@ -32,10 +70,21 @@ static int encrypted_recvfrom(int fd, char *buf, int buf_len,
     uint8_t raw[2048];
     int raw_n = recvfrom(fd, raw, sizeof(raw), 0, src, src_len);
     if (raw_n <= 0) return raw_n;
-    int plain_n = crypto_decrypt_packet(raw, raw_n, (uint8_t *)buf, buf_len - 1);
-    if (plain_n < 0) return 0; 
-    buf[plain_n] = '\0';
-    return plain_n;
+
+    uint8_t plain[2048];
+    int plain_n = crypto_decrypt_packet(raw, raw_n, plain, sizeof(plain));
+    if (plain_n < 0) return 0;
+
+    struct mesh_hdr hdr;
+    const char *payload;
+    int pl = mesh_frame_decode(plain, plain_n, &hdr, &payload);
+    if (pl < 0) return 0;                    /* not a v1 frame — drop */
+    if (seen_recently(hdr.msg_id)) return 0; /* duplicate or replay — drop */
+
+    if (pl > buf_len - 1) pl = buf_len - 1;
+    memcpy(buf, payload, pl);
+    buf[pl] = '\0';
+    return pl;
 }
 
 #define MAX_NODES 26

@@ -6,9 +6,9 @@ CFLAGS  = -Wall -pthread -I$(SODIUM_PREFIX)/include
 LDFLAGS = -L$(SODIUM_PREFIX)/lib -lsodium
 
 CHAT_BIN  = mesh_cli
-CHAT_SRCS = mesh_cli.c mesh_backend.c mesh_discovery.c mesh_crypto.c
+CHAT_SRCS = mesh_cli.c mesh_backend.c mesh_discovery.c mesh_crypto.c mesh_frame.c
 
-.PHONY: all build chat chat_node clean help
+.PHONY: all build chat chat_node clean help test
 
 all: build
 
@@ -25,8 +25,12 @@ ifndef PORT
 endif
 	@./$(CHAT_BIN) $(PORT) $(PASSWORD)
 
+test: test_frame.c mesh_frame.c
+	$(CC) $(CFLAGS) -o test_frame test_frame.c mesh_frame.c $(LDFLAGS)
+	@./test_frame
+
 clean:
-	rm -f $(CHAT_BIN) *.o chat_history_*.txt nodes.dat
+	rm -f $(CHAT_BIN) test_frame *.o chat_history_*.txt nodes.dat
 
 help:
 	@echo "Makefile targets:"

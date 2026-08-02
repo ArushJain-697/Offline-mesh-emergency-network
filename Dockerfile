@@ -14,4 +14,6 @@ COPY . .
 
 RUN make build
 
-CMD ["./mesh_cli"]
+# Port and password come from the env; override at `docker run` for cross-machine bootstrap.
+ENV MESH_PORT=9001 MESH_PASSWORD=mysecretpassword
+CMD ["sh", "-c", "./mesh_cli \"$MESH_PORT\" \"$MESH_PASSWORD\""]
